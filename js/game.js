@@ -449,10 +449,13 @@ export class Game {
     this._mapWorldX = (fx) => (fx - this.mapStart.fx) * cellSize;
     this._mapWorldZ = (fy) => (fy - this.mapStart.fy) * cellSize;
 
-    const minX = this._mapWorldX(0) - cellSize / 2;
-    const maxX = this._mapWorldX(this.fineGrid.fineW - 1) + cellSize / 2;
-    const minZ = this._mapWorldZ(0) - cellSize / 2;
-    const maxZ = this._mapWorldZ(this.fineGrid.fineH - 1) + cellSize / 2;
+    // Padded a bit extra beyond the nominal grid extent since walls are
+    // now pushed out past the true cell boundary (see wallSetback below).
+    const groundPad = cellSize / 2 + this.apothem;
+    const minX = this._mapWorldX(0) - groundPad;
+    const maxX = this._mapWorldX(this.fineGrid.fineW - 1) + groundPad;
+    const minZ = this._mapWorldZ(0) - groundPad;
+    const maxZ = this._mapWorldZ(this.fineGrid.fineH - 1) + groundPad;
 
     const groundGeo = new THREE.PlaneGeometry(maxX - minX, maxZ - minZ);
     const groundMat = new THREE.MeshStandardMaterial({
@@ -465,47 +468,68 @@ export class Game {
     this.scene.add(ground);
     this.mapGround = ground;
 
-    // Walls are rendered as thin partitions sitting exactly on the boundary
-    // between an open block and a closed neighbor - not as a box filling
-    // the closed block's whole footprint. A filled block would either have
-    // to match the corridor's width (reading as just as "wide" as the
-    // path) or leave a visible, illogical gap around a thinner box (open-
-    // looking floor that's actually still blocked).
+    // One inset box per *closed* block, pulled back from its own true
+    // footprint by `apothem` on all four sides uniformly - not a thin
+    // partition placed relative to each open neighbor separately. That
+    // per-neighbor approach seemed simpler, but at an inside corner (a
+    // closed block with two open neighbors on adjacent sides) each
+    // neighbor computes its own wall independently and the two can end up
+    // closer to *each other's* open cells than to their own, since neither
+    // one accounts for the other. A single box anchored to the closed
+    // block's own center provides the same clearance in every direction at
+    // once, so that can't happen; it also happens to come out thinner than
+    // the corridor (edgeLength apart on the sides makes it roughly a third
+    // as wide as the corridor is set to).
+    //
+    // The shape's own bounding radius (apothem) is bigger than half a
+    // cell, so standing in the cell right next to a wall already overhangs
+    // the true boundary before the wall is even considered; working
+    // through the arithmetic, insetting by exactly one apothem is what
+    // leaves a full edge-length of clearance from that overhang.
+    //
+    // Insetting every closed block the same way leaves a gap between any
+    // two closed blocks that happen to be next to each other - two corner
+    // blocks either side of an uncarved passage, say - which reads as
+    // disconnected pillars rather than a maze. Bridge those specific gaps
+    // with a thin connector sized to the *same* inset width, so it never
+    // reaches past where the two boxes already guaranteed clearance.
     this.mapWalls = [];
     const wallHeight = 2 * this.apothem;
-    const wallThickness = cellSize * 0.16;
-    const segmentLength = MAZE_RATIO * cellSize;
+    const blockHalfWidth = (MAZE_RATIO * cellSize) / 2;
+    const boxHalfWidth = blockHalfWidth - this.apothem;
+    const wallGeo = new THREE.BoxGeometry(boxHalfWidth * 2, wallHeight, boxHalfWidth * 2);
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x8a8fa6, roughness: 0.85 });
-    const hWallGeo = new THREE.BoxGeometry(wallThickness, wallHeight, segmentLength);
-    const vWallGeo = new THREE.BoxGeometry(segmentLength, wallHeight, wallThickness);
 
     const blockCenter = (bx, by) => ({
       fx: bx * MAZE_RATIO + (MAZE_RATIO - 1) / 2,
       fy: by * MAZE_RATIO + (MAZE_RATIO - 1) / 2,
     });
-    const addWallSegment = (geo, x, z) => {
+    const addBox = (x1, x2, z1, z2) => {
+      const geo = new THREE.BoxGeometry(x2 - x1, wallHeight, z2 - z1);
       const wall = new THREE.Mesh(geo, wallMat);
-      wall.position.set(x, wallHeight / 2, z);
+      wall.position.set((x1 + x2) / 2, wallHeight / 2, (z1 + z2) / 2);
       this.scene.add(wall);
       this.mapWalls.push(wall);
     };
 
     for (let by = 0; by < this.fineGrid.blocksY; by++) {
       for (let bx = 0; bx < this.fineGrid.blocksX; bx++) {
-        if (!this.fineGrid.blockOpen(bx, by)) continue;
+        if (this.fineGrid.blockOpen(bx, by)) continue;
         const c = blockCenter(bx, by);
         const cx = this._mapWorldX(c.fx);
         const cz = this._mapWorldZ(c.fy);
+        const wall = new THREE.Mesh(wallGeo, wallMat);
+        wall.position.set(cx, wallHeight / 2, cz);
+        this.scene.add(wall);
+        this.mapWalls.push(wall);
 
-        for (const [dx, dy] of [[1, 0], [-1, 0]]) {
-          if (this.fineGrid.blockOpen(bx + dx, by + dy)) continue;
-          const nc = blockCenter(bx + dx, by + dy);
-          addWallSegment(hWallGeo, (cx + this._mapWorldX(nc.fx)) / 2, cz);
+        if (!this.fineGrid.blockOpen(bx + 1, by)) {
+          const nc = this._mapWorldX(blockCenter(bx + 1, by).fx);
+          addBox(cx + boxHalfWidth, nc - boxHalfWidth, cz - boxHalfWidth, cz + boxHalfWidth);
         }
-        for (const [dx, dy] of [[0, 1], [0, -1]]) {
-          if (this.fineGrid.blockOpen(bx + dx, by + dy)) continue;
-          const nc = blockCenter(bx + dx, by + dy);
-          addWallSegment(vWallGeo, cx, (cz + this._mapWorldZ(nc.fy)) / 2);
+        if (!this.fineGrid.blockOpen(bx, by + 1)) {
+          const nc = this._mapWorldZ(blockCenter(bx, by + 1).fy);
+          addBox(cx - boxHalfWidth, cx + boxHalfWidth, cz + boxHalfWidth, nc - boxHalfWidth);
         }
       }
     }
