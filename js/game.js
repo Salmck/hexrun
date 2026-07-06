@@ -459,14 +459,21 @@ export class Game {
     const alpha = 1 - Math.exp(-dt / tau);
     this._camTarget.lerp(new THREE.Vector3(p.x, anchorY, p.z), alpha);
 
+    // The orbit offset itself (theta/elevation/radius) is applied exactly,
+    // not lerped - it's already-smoothed motion (from _camTarget) plus an
+    // exact user-controlled offset, so there's nothing left to smooth.
+    // Lerping the final position *again* here used to let it lag behind
+    // the offset that the orientation (below) assumes it's already at,
+    // which is exactly what made dragging the view feel like it swam -
+    // position trailing while orientation snapped straight to the new
+    // angle every frame, most visible while theta/elevation keep changing.
     const { theta, elevation, radius } = this.cameraOrbit;
     const horizontalRadius = radius * Math.cos(elevation);
-    const targetCamPos = new THREE.Vector3(
+    this.camera.position.set(
       this._camTarget.x + horizontalRadius * Math.sin(theta),
       this._camTarget.y + radius * Math.sin(elevation),
       this._camTarget.z + horizontalRadius * Math.cos(theta)
     );
-    this.camera.position.lerp(targetCamPos, alpha);
     // Deriving orientation from lookAt(target) recomputes it from a
     // position-to-target vector every frame; once that vector points
     // nearly straight down (high elevation) a tiny horizontal nudge from
