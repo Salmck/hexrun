@@ -18,16 +18,16 @@ const SAFE_START_ROWS = 4;
 const GEN_BATCH = 30;
 const MIN_OBSTACLE_EDGE_GAP = 4; // obstacles kept >= 4 edge-lengths apart
 
-const CAMERA_RADIUS_MIN = 12;
-const CAMERA_RADIUS_MAX = 48;
+const CAMERA_RADIUS_MIN = 7;
+const CAMERA_RADIUS_MAX = 140;
 const CAMERA_RADIUS_DEFAULT = 25;
 const CAMERA_ELEVATION_DEFAULT = 0.5; // radians above horizontal
 const CAMERA_ELEVATION_MIN = 0.06; // just above ground level
 const CAMERA_ELEVATION_MAX = 1.48; // near-overhead, high-angle view
 const ORBIT_SPEED = 0.006;
 const TILT_SPEED = 0.006;
-const ZOOM_SPEED = 0.03;
-const CAMERA_FOLLOW_TAU_MS = 130; // exponential smoothing time-constant
+const ZOOM_LOG_SPEED = 0.0022; // multiplicative zoom - constant feel across the whole range
+const CAMERA_FOLLOW_TAU_MS = 190; // exponential smoothing time-constant
 const CAMERA_DRAG_TAU_MS = 40;
 
 export class Game {
@@ -104,6 +104,7 @@ export class Game {
     this.shape.group.position.set(0, this.apothem, 0);
     this.shape.group.quaternion.identity();
     this.shape.phase = 'idle';
+    this._camTarget.set(0, this.apothem, 0);
 
     this.onStats({ distance: this.distance, dodges: this.dodges });
   }
@@ -127,10 +128,10 @@ export class Game {
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x14181f);
-    scene.fog = new THREE.Fog(0x14181f, 20, 90);
+    scene.fog = new THREE.Fog(0x14181f, 30, 260);
     this.scene = scene;
 
-    const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 300);
+    const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 320);
     this.camera = camera;
 
     const hemi = new THREE.HemisphereLight(0xfff3e0, 0x1a1e26, 0.7);
@@ -333,6 +334,11 @@ export class Game {
       elevation: CAMERA_ELEVATION_DEFAULT,
       radius: CAMERA_RADIUS_DEFAULT,
     };
+    // A smoothed follow anchor, separate from the shape's raw (jerky,
+    // stop-start) tumble position - both the camera position and its
+    // look-at point are derived from this so they never disagree about
+    // where "here" is, which is what made the view shudder.
+    this._camTarget = new THREE.Vector3(0, this.apothem, 0);
     this._dragging = false;
     this._lastPointerX = 0;
     this._lastPointerY = 0;
@@ -363,9 +369,12 @@ export class Game {
     };
     this._onWheel = (e) => {
       e.preventDefault();
+      // Multiplicative zoom keeps each notch feeling the same size whether
+      // you're zoomed in close or all the way out across the wide range.
+      const factor = Math.exp(e.deltaY * ZOOM_LOG_SPEED);
       this.cameraOrbit.radius = Math.min(
         CAMERA_RADIUS_MAX,
-        Math.max(CAMERA_RADIUS_MIN, this.cameraOrbit.radius + e.deltaY * ZOOM_SPEED)
+        Math.max(CAMERA_RADIUS_MIN, this.cameraOrbit.radius * factor)
       );
     };
 
@@ -423,21 +432,27 @@ export class Game {
     // Follow the shape's horizontal motion but pin the vertical anchor to its
     // resting height, so the arc it traces mid-tumble doesn't pitch the camera.
     const anchorY = this.apothem;
+
+    // Exponential smoothing keyed to elapsed time (not a fixed per-frame
+    // factor) so the follow speed stays consistent even when frame times
+    // are uneven. Smoothing the anchor itself - rather than smoothing the
+    // camera position while pointing it straight at the shape's raw,
+    // stop-start tumble position every frame - is what actually stops the
+    // view from shuddering: position and look-at now always agree on
+    // where "here" is.
+    const tau = this._dragging ? CAMERA_DRAG_TAU_MS : CAMERA_FOLLOW_TAU_MS;
+    const alpha = 1 - Math.exp(-dt / tau);
+    this._camTarget.lerp(new THREE.Vector3(p.x, anchorY, p.z), alpha);
+
     const { theta, elevation, radius } = this.cameraOrbit;
     const horizontalRadius = radius * Math.cos(elevation);
     const targetCamPos = new THREE.Vector3(
-      p.x + horizontalRadius * Math.sin(theta),
-      anchorY + radius * Math.sin(elevation),
-      p.z + horizontalRadius * Math.cos(theta)
+      this._camTarget.x + horizontalRadius * Math.sin(theta),
+      this._camTarget.y + radius * Math.sin(elevation),
+      this._camTarget.z + horizontalRadius * Math.cos(theta)
     );
-    // Exponential smoothing keyed to elapsed time (not a fixed per-frame
-    // factor) so the follow speed stays consistent even when frame times
-    // are uneven - a fixed-factor lerp looks jerky whenever the browser
-    // skips or bunches frames.
-    const tau = this._dragging ? CAMERA_DRAG_TAU_MS : CAMERA_FOLLOW_TAU_MS;
-    const alpha = 1 - Math.exp(-dt / tau);
     this.camera.position.lerp(targetCamPos, alpha);
-    this.camera.lookAt(p.x, anchorY, p.z);
+    this.camera.lookAt(this._camTarget);
 
     this.sun.position.set(p.x - 6, anchorY + 12, p.z + 8);
     this.sun.target.position.set(p.x, anchorY, p.z);
