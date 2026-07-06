@@ -248,7 +248,11 @@ export class Game {
 
   _setupTrack() {
     const laneCount = LANES.length;
-    const trackWidth = (this.laneWidth || 4) * (laneCount + 1);
+    // Dividers sit at +-0.5 lane-widths, so the road needs to be exactly
+    // laneCount lane-widths wide for all three strips (including the two
+    // outer ones) to come out equal - it was a full lane-width too wide
+    // before, which padded the outer lanes visibly wider than the middle.
+    const trackWidth = (this.laneWidth || 4) * laneCount;
     const groundGeo = new THREE.PlaneGeometry(trackWidth, 4000, 1, 1);
     const groundMat = new THREE.MeshStandardMaterial({
       color: 0xa3aab8,
@@ -275,7 +279,12 @@ export class Game {
   _ensureObstaclesGenerated(untilRow) {
     const laneWidth = this.laneWidth;
     const obstacleHeight = 2 * this.apothem;
-    const boxGeo = new THREE.BoxGeometry(laneWidth * 0.8, obstacleHeight, 2.2);
+    // Square footprint, and narrow enough that its inner edge clears the
+    // rolling shape's own resting bounding width (2x apothem) with a
+    // visible gap - at 0.8 lane-widths it was wide enough to graze the
+    // shape as it rolled past in an adjacent lane.
+    const obstacleSize = laneWidth * 0.5;
+    const boxGeo = new THREE.BoxGeometry(obstacleSize, obstacleHeight, obstacleSize);
     for (let row = this.generatedUntilRow + 1; row <= untilRow; row++) {
       const farEnoughFromLast = row - this.lastObstacleRow >= this.minObstacleRowGap;
       if (row > SAFE_START_ROWS && farEnoughFromLast && Math.random() < OBSTACLE_CHANCE) {
@@ -293,7 +302,7 @@ export class Game {
         mesh.position.set(lane * laneWidth, obstacleHeight / 2, z);
         this.scene.add(mesh);
 
-        const shadow = this._makeBlobShadow(laneWidth * 0.55);
+        const shadow = this._makeBlobShadow(obstacleSize * 0.7);
         shadow.position.set(lane * laneWidth, 0.02, z);
         this.scene.add(shadow);
 
@@ -313,27 +322,34 @@ export class Game {
     }
   }
 
+  _isBlocked(row, lane) {
+    const entry = this.obstaclesByRow.get(row);
+    return !!entry && entry.lane === lane;
+  }
+
   _decideNextMove() {
     const nextRow = this.rowIndex + 1;
     const blocked = this.obstaclesByRow.get(nextRow);
 
     if (blocked && blocked.lane === this.laneIndex) {
-      let dodgeDir;
-      let newLane;
-      if (this.laneIndex === -1) {
-        dodgeDir = RIGHT;
-        newLane = 0;
-      } else if (this.laneIndex === 1) {
-        dodgeDir = LEFT;
-        newLane = 0;
-      } else {
-        const goLeft = Math.random() < 0.5;
-        dodgeDir = goLeft ? LEFT : RIGHT;
-        newLane = goLeft ? -1 : 1;
-      }
-      this.laneIndex = newLane;
+      // A sideways tumble doesn't change row, so the only thing that can
+      // stop it is an obstacle sitting in the destination lane at the
+      // *current* row - check both candidate lanes rather than assuming
+      // whichever one isn't the forced "toward center" choice is clear.
+      const candidates =
+        this.laneIndex === -1
+          ? [{ dir: RIGHT, lane: 0 }]
+          : this.laneIndex === 1
+          ? [{ dir: LEFT, lane: 0 }]
+          : Math.random() < 0.5
+          ? [{ dir: LEFT, lane: -1 }, { dir: RIGHT, lane: 1 }]
+          : [{ dir: RIGHT, lane: 1 }, { dir: LEFT, lane: -1 }];
+      const choice = candidates.find((c) => !this._isBlocked(this.rowIndex, c.lane));
+      if (!choice) return; // boxed in on both sides - sit tight
+
+      this.laneIndex = choice.lane;
       this.dodges += 1;
-      this.shape.startMove(dodgeDir);
+      this.shape.startMove(choice.dir);
       return;
     }
 
@@ -420,10 +436,9 @@ export class Game {
 
     if (kind === 'left' && this.laneIndex <= -1) return;
     if (kind === 'right' && this.laneIndex >= 1) return;
-    if (kind === 'forward') {
-      const blocked = this.obstaclesByRow.get(this.rowIndex + 1);
-      if (blocked && blocked.lane === this.laneIndex) return;
-    }
+    if (kind === 'forward' && this._isBlocked(this.rowIndex + 1, this.laneIndex)) return;
+    if (kind === 'left' && this._isBlocked(this.rowIndex, this.laneIndex - 1)) return;
+    if (kind === 'right' && this._isBlocked(this.rowIndex, this.laneIndex + 1)) return;
     this.manualDir = kind;
   }
 
