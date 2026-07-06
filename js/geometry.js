@@ -156,19 +156,13 @@ export function buildRhombicuboctahedron(scale = 1) {
   return { vertices, faces, edgeAdjacency, edgeKey, apothem };
 }
 
-// Palette loosely inspired by the reference small-rhombicuboctahedron
-// illustration: soft pastels, deepened a touch so they keep presence
-// against the brighter sky/road rather than washing out.
-const PALETTE = [
-  0xe8a688, // peach
-  0xcbb3e0, // lavender
-  0xf0e4c2, // cream
-  0xbfa8d1, // mauve
-  0xa8b7cf, // powder blue
-  0xe0c9a8, // sand
-  0xd1abbb, // dusty pink
-  0xb3c2a8, // sage
-];
+// An evenly-spaced hue sweep at one consistent saturation/lightness reads
+// as a considered candy-pastel set rather than a grab bag of named colors -
+// every face is a genuine hue apart from its neighbors, so no two ever
+// look like a muddy near-match.
+const PALETTE_HUES = [12, 38, 65, 150, 190, 222, 265, 320];
+const PALETTE_SATURATION = 0.62;
+const PALETTE_LIGHTNESS = 0.72;
 
 export function buildMesh(rhombi) {
   const { vertices, faces } = rhombi;
@@ -179,7 +173,8 @@ export function buildMesh(rhombi) {
 
   faces.forEach((f, fi) => {
     const tris = f.idxs.length === 3 ? [[0, 1, 2]] : [[0, 1, 2], [0, 2, 3]];
-    color.setHex(PALETTE[fi % PALETTE.length]);
+    const hue = PALETTE_HUES[fi % PALETTE_HUES.length] / 360;
+    color.setHSL(hue, PALETTE_SATURATION, PALETTE_LIGHTNESS, THREE.SRGBColorSpace);
     for (const tri of tris) {
       for (const localIdx of tri) {
         const p = vertices[f.idxs[localIdx]];
@@ -198,19 +193,17 @@ export function buildMesh(rhombi) {
   geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
   geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
 
+  // No black wireframe overlay - flat per-face normals already separate the
+  // facets through shading alone, which reads softer and more polished than
+  // a graphic outline on top of realistic lighting.
   const material = new THREE.MeshStandardMaterial({
     vertexColors: true,
-    roughness: 0.6,
-    metalness: 0.05,
+    roughness: 0.4,
+    metalness: 0.06,
   });
   const mesh = new THREE.Mesh(geometry, material);
 
-  const edgeGeom = new THREE.EdgesGeometry(geometry, 1);
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0x2b2320 });
-  const edges = new THREE.LineSegments(edgeGeom, edgeMat);
-
   const group = new THREE.Group();
   group.add(mesh);
-  group.add(edges);
   return group;
 }
