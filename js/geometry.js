@@ -157,16 +157,17 @@ export function buildRhombicuboctahedron(scale = 1) {
 }
 
 // Palette loosely inspired by the reference small-rhombicuboctahedron
-// illustration: soft, slightly desaturated pastels.
+// illustration: soft pastels, deepened a touch so they keep presence
+// against the brighter sky/road rather than washing out.
 const PALETTE = [
-  0xe8b7a0, // peach
-  0xd9c9e6, // lavender
-  0xf3ead2, // cream
-  0xc9b8d8, // mauve
-  0xb9c4d6, // powder blue
-  0xead9c9, // sand
-  0xd8c3cf, // dusty pink
-  0xc7d3c0, // sage
+  0xe8a688, // peach
+  0xcbb3e0, // lavender
+  0xf0e4c2, // cream
+  0xbfa8d1, // mauve
+  0xa8b7cf, // powder blue
+  0xe0c9a8, // sand
+  0xd1abbb, // dusty pink
+  0xb3c2a8, // sage
 ];
 
 export function buildMesh(rhombi) {

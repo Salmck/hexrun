@@ -5,6 +5,8 @@ import { RollingShape } from './roller.js';
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const LEFT = new THREE.Vector3(-1, 0, 0);
 const RIGHT = new THREE.Vector3(1, 0, 0);
+const UP = new THREE.Vector3(0, 1, 0);
+const PITCH_AXIS = new THREE.Vector3(1, 0, 0);
 
 const SPEED_PRESETS = {
   slow: { tumbleDuration: 400, pauseBetween: 100, moveGap: 300 },
@@ -13,6 +15,10 @@ const SPEED_PRESETS = {
 };
 
 const LANES = [-1, 0, 1];
+// A curated "caution" family (warm, saturated) so obstacles always pop
+// against both the pastel shape and the light road, instead of a
+// narrow-hue random HSL that read as muddy on a dark background.
+const OBSTACLE_COLORS = [0xe8604f, 0xf0a03c, 0xd94f7a];
 const OBSTACLE_CHANCE = 0.6;
 const SAFE_START_ROWS = 4;
 const GEN_BATCH = 30;
@@ -124,17 +130,23 @@ export class Game {
       alpha: false,
     });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.12;
     this.renderer = renderer;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x14181f);
-    scene.fog = new THREE.Fog(0x14181f, 30, 260);
+    // A soft daylight sky rather than a night backdrop - the previous
+    // near-black background/fog and modest light levels made the whole
+    // scene read as dim regardless of any one object's color.
+    const skyColor = 0xdbe7f0;
+    scene.background = new THREE.Color(skyColor);
+    scene.fog = new THREE.Fog(skyColor, 40, 260);
     this.scene = scene;
 
     const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 320);
     this.camera = camera;
 
-    const hemi = new THREE.HemisphereLight(0xfff3e0, 0x1a1e26, 0.7);
+    const hemi = new THREE.HemisphereLight(0xfff8ee, 0xaab2c0, 0.95);
     scene.add(hemi);
 
     // A real-time shadow map re-projected every frame from a light that
@@ -142,13 +154,13 @@ export class Game {
     // (especially from oblique angles, where the ground fills the view).
     // Soft round "contact shadow" decals underneath the shape and each
     // obstacle look just as good here and are perfectly stable.
-    const sun = new THREE.DirectionalLight(0xfff3e0, 1.15);
+    const sun = new THREE.DirectionalLight(0xfff4e0, 1.5);
     sun.position.set(-6, 12, 8);
     scene.add(sun);
     scene.add(sun.target);
     this.sun = sun;
 
-    const fill = new THREE.DirectionalLight(0xb9c4d6, 0.4);
+    const fill = new THREE.DirectionalLight(0xcfe0ee, 0.55);
     fill.position.set(8, 6, -6);
     scene.add(fill);
 
@@ -239,7 +251,7 @@ export class Game {
     const trackWidth = (this.laneWidth || 4) * (laneCount + 1);
     const groundGeo = new THREE.PlaneGeometry(trackWidth, 4000, 1, 1);
     const groundMat = new THREE.MeshStandardMaterial({
-      color: 0x232a35,
+      color: 0xa3aab8,
       roughness: 0.95,
     });
     const ground = new THREE.Mesh(groundGeo, groundMat);
@@ -250,7 +262,7 @@ export class Game {
 
     const dividerGeo = new THREE.BoxGeometry(0.08, 0.02, 4000);
     const dividerMat = new THREE.MeshStandardMaterial({
-      color: 0x4a5468,
+      color: 0xf6f3ec,
       roughness: 0.8,
     });
     for (const offset of [-0.5, 0.5]) {
@@ -268,9 +280,12 @@ export class Game {
       const farEnoughFromLast = row - this.lastObstacleRow >= this.minObstacleRowGap;
       if (row > SAFE_START_ROWS && farEnoughFromLast && Math.random() < OBSTACLE_CHANCE) {
         const lane = LANES[Math.floor(Math.random() * LANES.length)];
-        const hue = (Math.random() < 0.5 ? 0.0 : 0.08) + Math.random() * 0.03;
+        const base = OBSTACLE_COLORS[Math.floor(Math.random() * OBSTACLE_COLORS.length)];
+        const color = new THREE.Color(base);
+        const jitter = 0.9 + Math.random() * 0.2;
+        color.multiplyScalar(jitter);
         const mat = new THREE.MeshStandardMaterial({
-          color: new THREE.Color().setHSL(hue, 0.72, 0.52),
+          color,
           roughness: 0.45,
         });
         const mesh = new THREE.Mesh(boxGeo, mat);
@@ -452,7 +467,16 @@ export class Game {
       this._camTarget.z + horizontalRadius * Math.cos(theta)
     );
     this.camera.position.lerp(targetCamPos, alpha);
-    this.camera.lookAt(this._camTarget);
+    // Deriving orientation from lookAt(target) recomputes it from a
+    // position-to-target vector every frame; once that vector points
+    // nearly straight down (high elevation) a tiny horizontal nudge from
+    // the shape moving swings the implied "roll" wildly, which read as
+    // the view snapping to an angle and back. theta/elevation are already
+    // exact, so build the quaternion from them directly instead - roll is
+    // never introduced in the first place, at any tilt.
+    const qYaw = new THREE.Quaternion().setFromAxisAngle(UP, theta);
+    const qPitch = new THREE.Quaternion().setFromAxisAngle(PITCH_AXIS, -elevation);
+    this.camera.quaternion.copy(qYaw.multiply(qPitch));
 
     this.sun.position.set(p.x - 6, anchorY + 12, p.z + 8);
     this.sun.target.position.set(p.x, anchorY, p.z);
