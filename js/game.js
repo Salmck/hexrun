@@ -18,11 +18,14 @@ const SAFE_START_ROWS = 4;
 const GEN_BATCH = 30;
 const MIN_OBSTACLE_EDGE_GAP = 4; // obstacles kept >= 4 edge-lengths apart
 
-const CAMERA_HEIGHT = 12;
 const CAMERA_RADIUS_MIN = 12;
 const CAMERA_RADIUS_MAX = 48;
-const CAMERA_RADIUS_DEFAULT = 22;
+const CAMERA_RADIUS_DEFAULT = 25;
+const CAMERA_ELEVATION_DEFAULT = 0.5; // radians above horizontal
+const CAMERA_ELEVATION_MIN = 0.06; // just above ground level
+const CAMERA_ELEVATION_MAX = 1.48; // near-overhead, high-angle view
 const ORBIT_SPEED = 0.006;
+const TILT_SPEED = 0.006;
 const ZOOM_SPEED = 0.03;
 
 export class Game {
@@ -289,20 +292,32 @@ export class Game {
   }
 
   _setupCameraControls() {
-    this.cameraOrbit = { theta: 0, radius: CAMERA_RADIUS_DEFAULT };
+    this.cameraOrbit = {
+      theta: 0,
+      elevation: CAMERA_ELEVATION_DEFAULT,
+      radius: CAMERA_RADIUS_DEFAULT,
+    };
     this._dragging = false;
     this._lastPointerX = 0;
+    this._lastPointerY = 0;
 
     this._onPointerDown = (e) => {
       this._dragging = true;
       this._lastPointerX = e.clientX;
+      this._lastPointerY = e.clientY;
       this.canvas.setPointerCapture(e.pointerId);
     };
     this._onPointerMove = (e) => {
       if (!this._dragging) return;
       const deltaX = e.clientX - this._lastPointerX;
+      const deltaY = e.clientY - this._lastPointerY;
       this._lastPointerX = e.clientX;
+      this._lastPointerY = e.clientY;
       this.cameraOrbit.theta -= deltaX * ORBIT_SPEED;
+      this.cameraOrbit.elevation = Math.min(
+        CAMERA_ELEVATION_MAX,
+        Math.max(CAMERA_ELEVATION_MIN, this.cameraOrbit.elevation - deltaY * TILT_SPEED)
+      );
     };
     this._onPointerUp = (e) => {
       this._dragging = false;
@@ -369,17 +384,21 @@ export class Game {
 
   _updateCamera() {
     const p = this.shape.group.position;
-    const { theta, radius } = this.cameraOrbit;
+    // Follow the shape's horizontal motion but pin the vertical anchor to its
+    // resting height, so the arc it traces mid-tumble doesn't pitch the camera.
+    const anchorY = this.apothem;
+    const { theta, elevation, radius } = this.cameraOrbit;
+    const horizontalRadius = radius * Math.cos(elevation);
     const targetCamPos = new THREE.Vector3(
-      p.x + radius * Math.sin(theta),
-      CAMERA_HEIGHT,
-      p.z + radius * Math.cos(theta)
+      p.x + horizontalRadius * Math.sin(theta),
+      anchorY + radius * Math.sin(elevation),
+      p.z + horizontalRadius * Math.cos(theta)
     );
     this.camera.position.lerp(targetCamPos, this._dragging ? 0.35 : 0.12);
-    this.camera.lookAt(p.x, p.y, p.z);
+    this.camera.lookAt(p.x, anchorY, p.z);
 
-    this.sun.position.set(p.x - 6, p.y + 12, p.z + 8);
-    this.sun.target.position.copy(p);
+    this.sun.position.set(p.x - 6, anchorY + 12, p.z + 8);
+    this.sun.target.position.set(p.x, anchorY, p.z);
     this.sun.target.updateMatrixWorld();
 
     this.ground.position.z = p.z - 1900 + 40;
