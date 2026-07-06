@@ -13,9 +13,17 @@ const SPEED_PRESETS = {
 };
 
 const LANES = [-1, 0, 1];
-const OBSTACLE_CHANCE = 0.5;
+const OBSTACLE_CHANCE = 0.6;
 const SAFE_START_ROWS = 4;
 const GEN_BATCH = 30;
+const MIN_OBSTACLE_EDGE_GAP = 4; // obstacles kept >= 4 edge-lengths apart
+
+const CAMERA_HEIGHT = 12;
+const CAMERA_RADIUS_MIN = 12;
+const CAMERA_RADIUS_MAX = 48;
+const CAMERA_RADIUS_DEFAULT = 22;
+const ORBIT_SPEED = 0.006;
+const ZOOM_SPEED = 0.03;
 
 export class Game {
   constructor(canvas, { onStats } = {}) {
@@ -31,15 +39,22 @@ export class Game {
 
     this.obstaclesByRow = new Map(); // row -> { lane, mesh }
     this.generatedUntilRow = 0;
+    this.lastObstacleRow = -Infinity;
     this.rowIndex = 0;
     this.laneIndex = 0;
     this.pendingGapMs = 0;
+    this.manualDir = null;
 
     this._ensureObstaclesGenerated(this.rowIndex + GEN_BATCH);
+
+    this._setupCameraControls();
 
     this._resizeHandler = () => this._onResize();
     window.addEventListener('resize', this._resizeHandler);
     this._onResize();
+
+    this._keyHandler = (e) => this._onKeyDown(e);
+    window.addEventListener('keydown', this._keyHandler);
 
     this._lastT = performance.now();
     this._rafId = requestAnimationFrame((t) => this._tick(t));
@@ -63,12 +78,14 @@ export class Game {
     this.rowIndex = 0;
     this.laneIndex = 0;
     this.pendingGapMs = 0;
+    this.manualDir = null;
 
     for (const { mesh } of this.obstaclesByRow.values()) {
       this.scene.remove(mesh);
     }
     this.obstaclesByRow.clear();
     this.generatedUntilRow = 0;
+    this.lastObstacleRow = -Infinity;
     this._ensureObstaclesGenerated(this.rowIndex + GEN_BATCH);
 
     this.shape.group.position.set(0, this.apothem, 0);
@@ -81,6 +98,8 @@ export class Game {
   dispose() {
     cancelAnimationFrame(this._rafId);
     window.removeEventListener('resize', this._resizeHandler);
+    window.removeEventListener('keydown', this._keyHandler);
+    this._teardownCameraControls();
     this.renderer.dispose();
   }
 
@@ -150,6 +169,15 @@ export class Game {
     // throwaway transform.
     this.forwardStep = this._measureStep(FORWARD, 'z');
     this.laneWidth = this._measureStep(RIGHT, 'x');
+
+    const primary = this.rhombi.faces.find((f) => f.type === 'primary');
+    const v0 = this.rhombi.vertices[primary.idxs[0]];
+    const v1 = this.rhombi.vertices[primary.idxs[1]];
+    this.edgeLength = v0.distanceTo(v1);
+    this.minObstacleRowGap = Math.max(
+      1,
+      Math.ceil((MIN_OBSTACLE_EDGE_GAP * this.edgeLength) / this.forwardStep)
+    );
   }
 
   _measureStep(dir, axis) {
@@ -195,9 +223,11 @@ export class Game {
 
   _ensureObstaclesGenerated(untilRow) {
     const laneWidth = this.laneWidth;
-    const boxGeo = new THREE.BoxGeometry(laneWidth * 0.62, 1.6, 1.1);
+    const obstacleHeight = 2 * this.apothem;
+    const boxGeo = new THREE.BoxGeometry(laneWidth * 0.8, obstacleHeight, 2.2);
     for (let row = this.generatedUntilRow + 1; row <= untilRow; row++) {
-      if (row > SAFE_START_ROWS && Math.random() < OBSTACLE_CHANCE) {
+      const farEnoughFromLast = row - this.lastObstacleRow >= this.minObstacleRowGap;
+      if (row > SAFE_START_ROWS && farEnoughFromLast && Math.random() < OBSTACLE_CHANCE) {
         const lane = LANES[Math.floor(Math.random() * LANES.length)];
         const hue = (Math.random() < 0.5 ? 0.0 : 0.08) + Math.random() * 0.03;
         const mat = new THREE.MeshStandardMaterial({
@@ -209,11 +239,12 @@ export class Game {
         mesh.receiveShadow = true;
         mesh.position.set(
           lane * laneWidth,
-          0.8,
+          obstacleHeight / 2,
           -row * this.forwardStep
         );
         this.scene.add(mesh);
         this.obstaclesByRow.set(row, { lane, mesh });
+        this.lastObstacleRow = row;
       }
     }
     this.generatedUntilRow = untilRow;
@@ -257,17 +288,95 @@ export class Game {
     this._ensureObstaclesGenerated(this.rowIndex + GEN_BATCH);
   }
 
+  _setupCameraControls() {
+    this.cameraOrbit = { theta: 0, radius: CAMERA_RADIUS_DEFAULT };
+    this._dragging = false;
+    this._lastPointerX = 0;
+
+    this._onPointerDown = (e) => {
+      this._dragging = true;
+      this._lastPointerX = e.clientX;
+      this.canvas.setPointerCapture(e.pointerId);
+    };
+    this._onPointerMove = (e) => {
+      if (!this._dragging) return;
+      const deltaX = e.clientX - this._lastPointerX;
+      this._lastPointerX = e.clientX;
+      this.cameraOrbit.theta -= deltaX * ORBIT_SPEED;
+    };
+    this._onPointerUp = (e) => {
+      this._dragging = false;
+      if (this.canvas.hasPointerCapture(e.pointerId)) {
+        this.canvas.releasePointerCapture(e.pointerId);
+      }
+    };
+    this._onWheel = (e) => {
+      e.preventDefault();
+      this.cameraOrbit.radius = Math.min(
+        CAMERA_RADIUS_MAX,
+        Math.max(CAMERA_RADIUS_MIN, this.cameraOrbit.radius + e.deltaY * ZOOM_SPEED)
+      );
+    };
+
+    this.canvas.style.touchAction = 'none';
+    this.canvas.addEventListener('pointerdown', this._onPointerDown);
+    this.canvas.addEventListener('pointermove', this._onPointerMove);
+    this.canvas.addEventListener('pointerup', this._onPointerUp);
+    this.canvas.addEventListener('pointercancel', this._onPointerUp);
+    this.canvas.addEventListener('wheel', this._onWheel, { passive: false });
+  }
+
+  _teardownCameraControls() {
+    this.canvas.removeEventListener('pointerdown', this._onPointerDown);
+    this.canvas.removeEventListener('pointermove', this._onPointerMove);
+    this.canvas.removeEventListener('pointerup', this._onPointerUp);
+    this.canvas.removeEventListener('pointercancel', this._onPointerUp);
+    this.canvas.removeEventListener('wheel', this._onWheel);
+  }
+
+  _onKeyDown(e) {
+    const key = e.key;
+    let kind = null;
+    if (key === 'ArrowUp' || key === 'w' || key === 'W') kind = 'forward';
+    else if (key === 'ArrowLeft' || key === 'a' || key === 'A') kind = 'left';
+    else if (key === 'ArrowRight' || key === 'd' || key === 'D') kind = 'right';
+    if (!kind) return;
+    e.preventDefault();
+
+    if (kind === 'left' && this.laneIndex <= -1) return;
+    if (kind === 'right' && this.laneIndex >= 1) return;
+    if (kind === 'forward') {
+      const blocked = this.obstaclesByRow.get(this.rowIndex + 1);
+      if (blocked && blocked.lane === this.laneIndex) return;
+    }
+    this.manualDir = kind;
+  }
+
+  _applyManualMove(kind) {
+    if (kind === 'forward') {
+      this.rowIndex += 1;
+      this.distance += 1;
+      this.shape.startMove(FORWARD);
+      this._ensureObstaclesGenerated(this.rowIndex + GEN_BATCH);
+    } else if (kind === 'left') {
+      this.laneIndex -= 1;
+      this.shape.startMove(LEFT);
+    } else if (kind === 'right') {
+      this.laneIndex += 1;
+      this.shape.startMove(RIGHT);
+    }
+  }
+
   _updateCamera() {
     const p = this.shape.group.position;
-    const camOffset = new THREE.Vector3(0, 12, 22);
+    const { theta, radius } = this.cameraOrbit;
     const targetCamPos = new THREE.Vector3(
-      p.x * 0.4,
-      camOffset.y,
-      p.z + camOffset.z
+      p.x + radius * Math.sin(theta),
+      CAMERA_HEIGHT,
+      p.z + radius * Math.cos(theta)
     );
-    this.camera.position.lerp(targetCamPos, 0.08);
-    const lookTarget = new THREE.Vector3(p.x * 0.4, 1, p.z - 18);
-    this.camera.lookAt(lookTarget);
+    this.camera.position.lerp(targetCamPos, this._dragging ? 0.35 : 0.12);
+    this.camera.lookAt(p.x, p.y, p.z);
 
     this.sun.position.set(p.x - 6, p.y + 12, p.z + 8);
     this.sun.target.position.copy(p);
@@ -291,7 +400,10 @@ export class Game {
 
     if (this.running) {
       if (!this.shape.isBusy()) {
-        if (this.pendingGapMs > 0) {
+        if (this.manualDir) {
+          this._applyManualMove(this.manualDir);
+          this.manualDir = null;
+        } else if (this.pendingGapMs > 0) {
           this.pendingGapMs -= dt;
         } else {
           this._decideNextMove();
