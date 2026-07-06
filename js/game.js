@@ -27,12 +27,15 @@ const CAMERA_ELEVATION_MAX = 1.48; // near-overhead, high-angle view
 const ORBIT_SPEED = 0.006;
 const TILT_SPEED = 0.006;
 const ZOOM_SPEED = 0.03;
+const CAMERA_FOLLOW_TAU_MS = 130; // exponential smoothing time-constant
+const CAMERA_DRAG_TAU_MS = 40;
 
 export class Game {
   constructor(canvas, { onStats } = {}) {
     this.canvas = canvas;
     this.onStats = onStats || (() => {});
     this.running = true;
+    this.mode = 'auto';
     this.distance = 0;
     this.dodges = 0;
 
@@ -75,6 +78,12 @@ export class Game {
     return this.running;
   }
 
+  toggleMode() {
+    this.mode = this.mode === 'auto' ? 'manual' : 'auto';
+    this.pendingGapMs = 0;
+    return this.mode;
+  }
+
   reset() {
     this.distance = 0;
     this.dodges = 0;
@@ -83,8 +92,9 @@ export class Game {
     this.pendingGapMs = 0;
     this.manualDir = null;
 
-    for (const { mesh } of this.obstaclesByRow.values()) {
+    for (const { mesh, shadow } of this.obstaclesByRow.values()) {
       this.scene.remove(mesh);
+      this.scene.remove(shadow);
     }
     this.obstaclesByRow.clear();
     this.generatedUntilRow = 0;
@@ -113,8 +123,6 @@ export class Game {
       alpha: false,
     });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer = renderer;
 
     const scene = new THREE.Scene();
@@ -125,25 +133,55 @@ export class Game {
     const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 300);
     this.camera = camera;
 
-    const hemi = new THREE.HemisphereLight(0xfff3e0, 0x1a1e26, 0.65);
+    const hemi = new THREE.HemisphereLight(0xfff3e0, 0x1a1e26, 0.7);
     scene.add(hemi);
 
-    const sun = new THREE.DirectionalLight(0xfff3e0, 1.1);
+    // A real-time shadow map re-projected every frame from a light that
+    // keeps translating with the shape produces visible swimming/flicker
+    // (especially from oblique angles, where the ground fills the view).
+    // Soft round "contact shadow" decals underneath the shape and each
+    // obstacle look just as good here and are perfectly stable.
+    const sun = new THREE.DirectionalLight(0xfff3e0, 1.15);
     sun.position.set(-6, 12, 8);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024);
-    sun.shadow.camera.left = -20;
-    sun.shadow.camera.right = 20;
-    sun.shadow.camera.top = 20;
-    sun.shadow.camera.bottom = -20;
-    sun.shadow.camera.far = 60;
     scene.add(sun);
     scene.add(sun.target);
     this.sun = sun;
 
-    const fill = new THREE.DirectionalLight(0xb9c4d6, 0.35);
+    const fill = new THREE.DirectionalLight(0xb9c4d6, 0.4);
     fill.position.set(8, 6, -6);
     scene.add(fill);
+
+    this.shadowTexture = this._createBlobShadowTexture();
+  }
+
+  _createBlobShadowTexture() {
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const gradient = ctx.createRadialGradient(
+      size / 2, size / 2, 0,
+      size / 2, size / 2, size / 2
+    );
+    gradient.addColorStop(0, 'rgba(0,0,0,0.5)');
+    gradient.addColorStop(0.7, 'rgba(0,0,0,0.28)');
+    gradient.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+    return new THREE.CanvasTexture(canvas);
+  }
+
+  _makeBlobShadow(radius) {
+    const geo = new THREE.PlaneGeometry(radius * 2, radius * 2);
+    const mat = new THREE.MeshBasicMaterial({
+      map: this.shadowTexture,
+      transparent: true,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    return mesh;
   }
 
   _setupShape() {
@@ -151,14 +189,12 @@ export class Game {
     this.apothem = this.rhombi.apothem;
 
     const meshGroup = buildMesh(this.rhombi);
-    meshGroup.traverse((obj) => {
-      if (obj.isMesh) {
-        obj.castShadow = true;
-        obj.receiveShadow = false;
-      }
-    });
     meshGroup.position.set(0, this.apothem, 0);
     this.scene.add(meshGroup);
+
+    this.shapeShadow = this._makeBlobShadow(this.apothem * 1.15);
+    this.shapeShadow.position.set(0, 0.02, 0);
+    this.scene.add(this.shapeShadow);
 
     this.shape = new RollingShape(this.rhombi, meshGroup);
     this.setSpeed('normal');
@@ -208,7 +244,6 @@ export class Game {
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
     ground.position.set(0, 0, -1900);
-    ground.receiveShadow = true;
     this.scene.add(ground);
     this.ground = ground;
 
@@ -238,15 +273,15 @@ export class Game {
           roughness: 0.45,
         });
         const mesh = new THREE.Mesh(boxGeo, mat);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        mesh.position.set(
-          lane * laneWidth,
-          obstacleHeight / 2,
-          -row * this.forwardStep
-        );
+        const z = -row * this.forwardStep;
+        mesh.position.set(lane * laneWidth, obstacleHeight / 2, z);
         this.scene.add(mesh);
-        this.obstaclesByRow.set(row, { lane, mesh });
+
+        const shadow = this._makeBlobShadow(laneWidth * 0.55);
+        shadow.position.set(lane * laneWidth, 0.02, z);
+        this.scene.add(shadow);
+
+        this.obstaclesByRow.set(row, { lane, mesh, shadow });
         this.lastObstacleRow = row;
       }
     }
@@ -256,6 +291,7 @@ export class Game {
     for (const [row, entry] of this.obstaclesByRow.entries()) {
       if (row < this.rowIndex - 6) {
         this.scene.remove(entry.mesh);
+        this.scene.remove(entry.shadow);
         this.obstaclesByRow.delete(row);
       }
     }
@@ -382,7 +418,7 @@ export class Game {
     }
   }
 
-  _updateCamera() {
+  _updateCamera(dt) {
     const p = this.shape.group.position;
     // Follow the shape's horizontal motion but pin the vertical anchor to its
     // resting height, so the arc it traces mid-tumble doesn't pitch the camera.
@@ -394,13 +430,20 @@ export class Game {
       anchorY + radius * Math.sin(elevation),
       p.z + horizontalRadius * Math.cos(theta)
     );
-    this.camera.position.lerp(targetCamPos, this._dragging ? 0.35 : 0.12);
+    // Exponential smoothing keyed to elapsed time (not a fixed per-frame
+    // factor) so the follow speed stays consistent even when frame times
+    // are uneven - a fixed-factor lerp looks jerky whenever the browser
+    // skips or bunches frames.
+    const tau = this._dragging ? CAMERA_DRAG_TAU_MS : CAMERA_FOLLOW_TAU_MS;
+    const alpha = 1 - Math.exp(-dt / tau);
+    this.camera.position.lerp(targetCamPos, alpha);
     this.camera.lookAt(p.x, anchorY, p.z);
 
     this.sun.position.set(p.x - 6, anchorY + 12, p.z + 8);
     this.sun.target.position.set(p.x, anchorY, p.z);
     this.sun.target.updateMatrixWorld();
 
+    this.shapeShadow.position.set(p.x, 0.02, p.z);
     this.ground.position.z = p.z - 1900 + 40;
   }
 
@@ -422,17 +465,19 @@ export class Game {
         if (this.manualDir) {
           this._applyManualMove(this.manualDir);
           this.manualDir = null;
-        } else if (this.pendingGapMs > 0) {
-          this.pendingGapMs -= dt;
-        } else {
-          this._decideNextMove();
+        } else if (this.mode === 'auto') {
+          if (this.pendingGapMs > 0) {
+            this.pendingGapMs -= dt;
+          } else {
+            this._decideNextMove();
+          }
         }
       }
       this.shape.update(dt);
-      this.onStats({ distance: this.distance, dodges: this.dodges });
+      this.onStats({ distance: this.distance, dodges: this.dodges, mode: this.mode });
     }
 
-    this._updateCamera();
+    this._updateCamera(dt);
     this.renderer.render(this.scene, this.camera);
   }
 }

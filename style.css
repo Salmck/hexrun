@@ -111,6 +111,10 @@ html, body {
   filter: brightness(0.95);
 }
 
+#btn-mode {
+  background: #ead9c9 !important;
+}
+
 #btn-reset {
   background: #b9c4d6 !important;
 }

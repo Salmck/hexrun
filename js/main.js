@@ -4,6 +4,7 @@ const canvas = document.getElementById('scene');
 const distanceEl = document.getElementById('stat-distance');
 const dodgesEl = document.getElementById('stat-dodges');
 const toggleBtn = document.getElementById('btn-toggle');
+const modeBtn = document.getElementById('btn-mode');
 const resetBtn = document.getElementById('btn-reset');
 const speedSelect = document.getElementById('speed');
 
@@ -19,6 +20,11 @@ window.__game = game;
 toggleBtn.addEventListener('click', () => {
   const running = game.toggle();
   toggleBtn.textContent = running ? '暂停' : '继续';
+});
+
+modeBtn.addEventListener('click', () => {
+  const mode = game.toggleMode();
+  modeBtn.textContent = mode === 'auto' ? '模式：自动' : '模式：手动';
 });
 
 resetBtn.addEventListener('click', () => {
