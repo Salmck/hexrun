@@ -111,6 +111,10 @@ html, body {
   filter: brightness(0.95);
 }
 
+#btn-gametype {
+  background: #b3c2a8 !important;
+}
+
 #btn-mode {
   background: #ead9c9 !important;
 }
