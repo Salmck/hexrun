@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js';
-import { generateMaze, buildFineGrid, findPath, bfsFarthest } from './maze.js';
+import { generateMaze, buildBlockGrid, findPath, bfsFarthest } from './maze.js';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -428,31 +428,41 @@ export class Game {
   // Map mode: procedurally generated maze, start-to-goal, A* in auto mode.
   // ---------------------------------------------------------------------
 
+  // Movement operates directly on the block grid (one room/passage/corner
+  // block = one graph node), not on a further fine subdivision inside each
+  // block. Each logical step crosses exactly one block via two chained
+  // tumbles (matching the block's full MAZE_RATIO*cellSize width), so the
+  // shape only ever comes to rest at a block's true center - a full block
+  // half-width (2 edge-lengths) from every wall, comfortably clear of its
+  // ~1.207 edge-length apothem. Flush, uniform walls are then always safe,
+  // with no per-side inset or corner special-casing required.
   _setupMapMode() {
     this.maze = generateMaze(MAZE_COARSE_SIZE, MAZE_COARSE_SIZE, Math.random);
-    this.fineGrid = buildFineGrid(this.maze, MAZE_RATIO);
+    this.blockGrid = buildBlockGrid(this.maze);
+    const { blockOpen, blocksX, blocksY } = this.blockGrid;
 
-    const roomA = this.fineGrid.roomCenter(0, 0);
-    const pass1 = bfsFarthest(this.fineGrid.fineOpen, this.fineGrid.fineW, roomA);
-    const pass2 = bfsFarthest(this.fineGrid.fineOpen, this.fineGrid.fineW, pass1.point);
-    this.mapStart = pass1.point;
-    this.mapGoal = pass2.point;
+    const pass1 = bfsFarthest(blockOpen, blocksX, { fx: 0, fy: 0 });
+    const pass2 = bfsFarthest(blockOpen, blocksX, pass1.point);
+    this.mapStart = { bx: pass1.point.fx, by: pass1.point.fy };
+    this.mapGoal = { bx: pass2.point.fx, by: pass2.point.fy };
 
-    this.fx = this.mapStart.fx;
-    this.fy = this.mapStart.fy;
+    this.bx = this.mapStart.bx;
+    this.by = this.mapStart.by;
     this.mapPath = null;
     this.mapPathIndex = 0;
+    this.mapPendingDir = null;
     this.mapSteps = 0;
     this.mapStatus = 'solving';
 
     const cellSize = this.forwardStep;
-    this._mapWorldX = (fx) => (fx - this.mapStart.fx) * cellSize;
-    this._mapWorldZ = (fy) => (fy - this.mapStart.fy) * cellSize;
+    const blockStep = MAZE_RATIO * cellSize; // world distance between adjacent block centers
+    this._mapWorldX = (bx) => (bx - this.mapStart.bx) * blockStep;
+    this._mapWorldZ = (by) => (by - this.mapStart.by) * blockStep;
 
-    const minX = this._mapWorldX(0) - cellSize / 2;
-    const maxX = this._mapWorldX(this.fineGrid.fineW - 1) + cellSize / 2;
-    const minZ = this._mapWorldZ(0) - cellSize / 2;
-    const maxZ = this._mapWorldZ(this.fineGrid.fineH - 1) + cellSize / 2;
+    const minX = this._mapWorldX(0) - blockStep / 2;
+    const maxX = this._mapWorldX(blocksX - 1) + blockStep / 2;
+    const minZ = this._mapWorldZ(0) - blockStep / 2;
+    const maxZ = this._mapWorldZ(blocksY - 1) + blockStep / 2;
 
     const groundGeo = new THREE.PlaneGeometry(maxX - minX, maxZ - minZ);
     const groundMat = new THREE.MeshStandardMaterial({
@@ -474,15 +484,10 @@ export class Game {
     this.mapWalls = [];
     const wallHeight = 2 * this.apothem;
     const wallThickness = cellSize * 0.16;
-    const segmentLength = MAZE_RATIO * cellSize;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x8a8fa6, roughness: 0.85 });
-    const hWallGeo = new THREE.BoxGeometry(wallThickness, wallHeight, segmentLength);
-    const vWallGeo = new THREE.BoxGeometry(segmentLength, wallHeight, wallThickness);
+    const hWallGeo = new THREE.BoxGeometry(wallThickness, wallHeight, blockStep);
+    const vWallGeo = new THREE.BoxGeometry(blockStep, wallHeight, wallThickness);
 
-    const blockCenter = (bx, by) => ({
-      fx: bx * MAZE_RATIO + (MAZE_RATIO - 1) / 2,
-      fy: by * MAZE_RATIO + (MAZE_RATIO - 1) / 2,
-    });
     const addWallSegment = (geo, x, z) => {
       const wall = new THREE.Mesh(geo, wallMat);
       wall.position.set(x, wallHeight / 2, z);
@@ -490,22 +495,19 @@ export class Game {
       this.mapWalls.push(wall);
     };
 
-    for (let by = 0; by < this.fineGrid.blocksY; by++) {
-      for (let bx = 0; bx < this.fineGrid.blocksX; bx++) {
-        if (!this.fineGrid.blockOpen(bx, by)) continue;
-        const c = blockCenter(bx, by);
-        const cx = this._mapWorldX(c.fx);
-        const cz = this._mapWorldZ(c.fy);
+    for (let by = 0; by < blocksY; by++) {
+      for (let bx = 0; bx < blocksX; bx++) {
+        if (!blockOpen(bx, by)) continue;
+        const cx = this._mapWorldX(bx);
+        const cz = this._mapWorldZ(by);
 
         for (const [dx, dy] of [[1, 0], [-1, 0]]) {
-          if (this.fineGrid.blockOpen(bx + dx, by + dy)) continue;
-          const nc = blockCenter(bx + dx, by + dy);
-          addWallSegment(hWallGeo, (cx + this._mapWorldX(nc.fx)) / 2, cz);
+          if (blockOpen(bx + dx, by + dy)) continue;
+          addWallSegment(hWallGeo, (cx + this._mapWorldX(bx + dx)) / 2, cz);
         }
         for (const [dx, dy] of [[0, 1], [0, -1]]) {
-          if (this.fineGrid.blockOpen(bx + dx, by + dy)) continue;
-          const nc = blockCenter(bx + dx, by + dy);
-          addWallSegment(vWallGeo, cx, (cz + this._mapWorldZ(nc.fy)) / 2);
+          if (blockOpen(bx + dx, by + dy)) continue;
+          addWallSegment(vWallGeo, cx, (cz + this._mapWorldZ(by + dy)) / 2);
         }
       }
     }
@@ -515,9 +517,9 @@ export class Game {
     const goalMarker = new THREE.Mesh(goalGeo, goalMat);
     goalMarker.rotation.x = -Math.PI / 2;
     goalMarker.position.set(
-      this._mapWorldX(this.mapGoal.fx),
+      this._mapWorldX(this.mapGoal.bx),
       0.03,
-      this._mapWorldZ(this.mapGoal.fy)
+      this._mapWorldZ(this.mapGoal.by)
     );
     this.scene.add(goalMarker);
     this.mapGoalMarker = goalMarker;
@@ -539,10 +541,10 @@ export class Game {
 
     if (!this.mapPath || this.mapPathIndex >= this.mapPath.length - 1) {
       this.mapPath = findPath(
-        this.fineGrid.fineOpen,
-        this.fineGrid.fineW,
-        { fx: this.fx, fy: this.fy },
-        this.mapGoal
+        this.blockGrid.blockOpen,
+        this.blockGrid.blocksX,
+        { fx: this.bx, fy: this.by },
+        { fx: this.mapGoal.bx, fy: this.mapGoal.by }
       );
       this.mapPathIndex = 0;
       if (!this.mapPath) {
@@ -552,15 +554,16 @@ export class Game {
     }
 
     const next = this.mapPath[this.mapPathIndex + 1];
-    const dx = next.fx - this.fx;
-    const dy = next.fy - this.fy;
+    const dx = next.fx - this.bx;
+    const dy = next.fy - this.by;
     const dir = dx === 1 ? RIGHT : dx === -1 ? LEFT : dy === 1 ? BACKWARD : FORWARD;
-    this.fx = next.fx;
-    this.fy = next.fy;
+    this.bx = next.fx;
+    this.by = next.fy;
     this.mapPathIndex += 1;
     this.mapSteps += 1;
     this.shape.startMove(dir);
-    if (this.fx === this.mapGoal.fx && this.fy === this.mapGoal.fy) {
+    this.mapPendingDir = dir;
+    if (this.bx === this.mapGoal.bx && this.by === this.mapGoal.by) {
       this.mapStatus = 'reached';
     }
   }
@@ -653,7 +656,7 @@ export class Game {
       if (kind === 'right' && this._isTrackBlocked(this.rowIndex, this.laneIndex + 1)) return;
     } else {
       const { dx, dy } = MAP_DIR_DELTAS[kind];
-      if (!this.fineGrid.fineOpen(this.fx + dx, this.fy + dy)) return;
+      if (!this.blockGrid.blockOpen(this.bx + dx, this.by + dy)) return;
     }
 
     e.preventDefault();
@@ -678,13 +681,14 @@ export class Game {
     }
 
     const { dx, dy, vec } = MAP_DIR_DELTAS[kind];
-    this.fx += dx;
-    this.fy += dy;
+    this.bx += dx;
+    this.by += dy;
     this.mapSteps += 1;
     this.shape.startMove(vec);
+    this.mapPendingDir = vec;
     // The cached A* path no longer starts where the shape actually is.
     this.mapPath = null;
-    if (this.fx === this.mapGoal.fx && this.fy === this.mapGoal.fy) {
+    if (this.bx === this.mapGoal.bx && this.by === this.mapGoal.by) {
       this.mapStatus = 'reached';
     }
   }
@@ -760,7 +764,15 @@ export class Game {
 
     if (this.running) {
       if (!this.shape.isBusy()) {
-        if (this.manualDir) {
+        if (this.mapPendingDir) {
+          // Second half of a one-block crossing (see _setupMapMode) -
+          // chains immediately, with no gap, so the two tumbles read as one
+          // continuous motion across the block rather than a mid-corridor
+          // pause.
+          const dir = this.mapPendingDir;
+          this.mapPendingDir = null;
+          this.shape.startMove(dir);
+        } else if (this.manualDir) {
           this._applyManualMove(this.manualDir);
           this.manualDir = null;
         } else if (this.mode === 'auto') {

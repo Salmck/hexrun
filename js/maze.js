@@ -1,12 +1,13 @@
-// Maze generation, fine-grid conversion, and A* pathfinding for map mode.
+// Maze generation, block-grid connectivity, and A* pathfinding for map mode.
 //
 // The maze is generated on a coarse room grid (randomized depth-first
 // "recursive backtracker", producing a perfect maze - exactly one path
-// between any two rooms). Each room and each passage between adjacent
-// rooms is then expanded into a RATIO x RATIO block of "fine" cells,
-// where one fine cell equals one of the rolling shape's actual double-
-// tumble steps. That's what guarantees every corridor is a uniform
-// RATIO-cells wide, not just one cell with occasional pinch points.
+// between any two rooms). Rooms and the passages between adjacent rooms
+// are addressed on a single doubled "block" grid (blockOpen), where every
+// other row/column is a passage slot that's open only if the recursive
+// backtracker carved it, and diagonal corner blocks between four rooms are
+// always closed. The rolling shape moves one block per logical step - it
+// only ever rests at a block's true center, never partway across one.
 
 export function generateMaze(coarseW, coarseH, rng = Math.random) {
   const visited = Array.from({ length: coarseH }, () => new Array(coarseW).fill(false));
@@ -37,12 +38,10 @@ export function generateMaze(coarseW, coarseH, rng = Math.random) {
   return { coarseW, coarseH, hOpen, vOpen };
 }
 
-export function buildFineGrid(maze, ratio) {
+export function buildBlockGrid(maze) {
   const { coarseW, coarseH, hOpen, vOpen } = maze;
   const blocksX = 2 * coarseW - 1;
   const blocksY = 2 * coarseH - 1;
-  const fineW = blocksX * ratio;
-  const fineH = blocksY * ratio;
 
   function blockOpen(bx, by) {
     if (bx < 0 || by < 0 || bx >= blocksX || by >= blocksY) return false;
@@ -60,23 +59,11 @@ export function buildFineGrid(maze, ratio) {
     return false; // diagonal corner between four rooms - always a wall
   }
 
-  function fineOpen(fx, fy) {
-    if (fx < 0 || fy < 0 || fx >= fineW || fy >= fineH) return false;
-    return blockOpen(Math.floor(fx / ratio), Math.floor(fy / ratio));
-  }
-
-  function roomCenter(rx, ry) {
-    return {
-      fx: 2 * rx * ratio + Math.floor(ratio / 2),
-      fy: 2 * ry * ratio + Math.floor(ratio / 2),
-    };
-  }
-
-  return { fineW, fineH, ratio, fineOpen, roomCenter, blocksX, blocksY, blockOpen };
+  return { blocksX, blocksY, blockOpen };
 }
 
-export function findPath(fineOpen, fineW, start, goal) {
-  const key = (x, y) => y * fineW + x;
+export function findPath(isOpen, gridW, start, goal) {
+  const key = (x, y) => y * gridW + x;
   const heuristic = (x, y) => Math.abs(x - goal.fx) + Math.abs(y - goal.fy);
   const gScore = new Map();
   const cameFrom = new Map();
@@ -91,13 +78,13 @@ export function findPath(fineOpen, fineW, start, goal) {
     for (const [k, f] of open) {
       if (f < curF) { curF = f; curKey = k; }
     }
-    const cx = curKey % fineW, cy = Math.floor(curKey / fineW);
+    const cx = curKey % gridW, cy = Math.floor(curKey / gridW);
     if (cx === goal.fx && cy === goal.fy) {
       const path = [{ fx: cx, fy: cy }];
       let k = curKey;
       while (cameFrom.has(k)) {
         k = cameFrom.get(k);
-        path.push({ fx: k % fineW, fy: Math.floor(k / fineW) });
+        path.push({ fx: k % gridW, fy: Math.floor(k / gridW) });
       }
       path.reverse();
       return path;
@@ -107,7 +94,7 @@ export function findPath(fineOpen, fineW, start, goal) {
 
     for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const nx = cx + dx, ny = cy + dy;
-      if (!fineOpen(nx, ny)) continue;
+      if (!isOpen(nx, ny)) continue;
       const nk = key(nx, ny);
       if (closed.has(nk)) continue;
       const tentativeG = gScore.get(curKey) + 1;
@@ -126,9 +113,9 @@ export function findPath(fineOpen, fineW, start, goal) {
 // result - gives a good approximation of the maze's two most distant
 // points, which makes for a more interesting start/goal pair than two
 // arbitrary corners.
-export function bfsFarthest(fineOpen, fineW, start) {
+export function bfsFarthest(isOpen, gridW, start) {
   const dist = new Map();
-  const key = (x, y) => y * fineW + x;
+  const key = (x, y) => y * gridW + x;
   dist.set(key(start.fx, start.fy), 0);
   const queue = [start];
   let head = 0;
@@ -139,7 +126,7 @@ export function bfsFarthest(fineOpen, fineW, start) {
     if (d > maxDist) { maxDist = d; farthest = cur; }
     for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const nx = cur.fx + dx, ny = cur.fy + dy;
-      if (!fineOpen(nx, ny)) continue;
+      if (!isOpen(nx, ny)) continue;
       const nk = key(nx, ny);
       if (dist.has(nk)) continue;
       dist.set(nk, d + 1);
