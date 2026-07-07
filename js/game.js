@@ -510,14 +510,14 @@ export class Game {
     const goalMarker = new THREE.Mesh(goalGeo, goalMat);
     goalMarker.rotation.x = -Math.PI / 2;
     goalMarker.position.set(
-      this._mapWorldX(this.mapGoal.fx) + this.edgeLength,
+      this._mapWorldX(this.mapGoal.fx),
       0.03,
-      this._mapWorldZ(this.mapGoal.fy) + this.edgeLength
+      this._mapWorldZ(this.mapGoal.fy)
     );
     this.scene.add(goalMarker);
     this.mapGoalMarker = goalMarker;
 
-    this.shape.group.position.set(this.edgeLength, this.apothem, this.edgeLength);
+    this.shape.group.position.set(0, this.apothem, 0);
     this.shape.group.quaternion.identity();
     this.shape.phase = 'idle';
   }
