@@ -3,6 +3,7 @@
 // positions and sizes, and the goal marker straight off the Game object, so
 // the 2D and 3D views can never disagree about the layout. No game logic
 // lives here: this only paints. Toggled on/off by the Game (Alt+3).
+import * as THREE from 'three';
 
 // Matches the 3D face palette (geometry.js PALETTE_HUES) so the shape reads as
 // the same object in both views.
@@ -23,11 +24,15 @@ export class Renderer2D {
     // is visible around the shape.
     this.trackScale = 11;
     this.mapScale = 9;
-    this._roll = 0;
-    this._lastX = null;
-    this._lastZ = null;
     this._w = 0;
     this._h = 0;
+    // Scratch objects reused each frame for the shape projection.
+    this._q = new THREE.Quaternion();
+    this._v = new THREE.Vector3();
+    this._n = new THREE.Vector3();
+    // Per-face fill, matching the 3D per-face palette (buildMesh in
+    // geometry.js: hue = PALETTE_HUES[faceIndex % 8]).
+    this._faceColors = null;
   }
 
   resize(w, h) {
@@ -50,14 +55,6 @@ export class Renderer2D {
     ctx.fillRect(0, 0, W, H);
 
     const p = g.shape.group.position;
-    // Accumulate a "rolling" angle from the shape's horizontal travel - purely
-    // cosmetic, so the top-down icon visibly spins as it crosses cells.
-    if (this._lastX !== null) {
-      this._roll += Math.hypot(p.x - this._lastX, p.z - this._lastZ);
-    }
-    this._lastX = p.x;
-    this._lastZ = p.z;
-
     const isTrack = g.gameType === 'track';
     const scale = isTrack ? this.trackScale : this.mapScale;
     const originX = W / 2 - p.x * scale;
@@ -69,9 +66,7 @@ export class Renderer2D {
     if (isTrack) this._renderTrack(ctx, g, toX, toY, scale);
     else this._renderMap(ctx, g, toX, toY, scale);
 
-    // Roll a quarter turn per double-tumble (one cell), matching the 3D motion.
-    const rollAngle = (this._roll / g.forwardStep) * (Math.PI / 2);
-    this._drawShape(ctx, toX(p.x), toY(p.z), g.apothem * scale, rollAngle);
+    this._drawShape(ctx, toX(p.x), toY(p.z), scale);
   }
 
   _renderTrack(ctx, g, toX, toY, scale) {
@@ -155,41 +150,64 @@ export class Renderer2D {
     }
   }
 
-  _drawShape(ctx, cx, cy, r, rot) {
-    // Contact shadow.
+  // Draws the true top-down orthographic projection of the 3D shape at its
+  // current orientation: every face's vertices are rotated by the live
+  // quaternion, projected onto the ground plane (x, z), and the faces pointing
+  // up toward the overhead camera are painted with their real colours. This
+  // reproduces the exact pattern seen from directly above - all 72 resting
+  // patterns (18 square faces x 4 rotations) plus every in-between tumble
+  // frame - with no sprite table.
+  _drawShape(ctx, cx, cy, scale) {
+    const g = this.game;
+    const rhombi = g.rhombi;
+    if (!rhombi) return;
+
+    if (!this._faceColors) {
+      const c = new THREE.Color();
+      this._faceColors = rhombi.faces.map((_, fi) => {
+        c.setHSL(PALETTE_HUES[fi % PALETTE_HUES.length] / 360, 0.62, 0.72);
+        return '#' + c.getHexString();
+      });
+    }
+
+    const q = this._q.copy(g.shape.group.quaternion);
+    const apothem = g.apothem;
+
+    // Contact shadow (roughly the resting silhouette footprint).
     ctx.beginPath();
-    ctx.ellipse(cx, cy + r * 0.12, r * 1.04, r * 0.98, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx, cy + apothem * scale * 0.12, apothem * scale * 1.05, apothem * scale * 0.98, 0, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(20,30,45,0.14)';
     ctx.fill();
 
-    const N = 8;
-    const base = rot + Math.PI / 8; // flat edge faces forward
-    // Rainbow wedges, echoing the 3D per-face palette.
-    for (let i = 0; i < N; i++) {
-      const a0 = base + (i * 2 * Math.PI) / N;
-      const a1 = base + ((i + 1) * 2 * Math.PI) / N;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(cx + r * Math.cos(a0), cy + r * Math.sin(a0));
-      ctx.lineTo(cx + r * Math.cos(a1), cy + r * Math.sin(a1));
-      ctx.closePath();
-      ctx.fillStyle = `hsl(${PALETTE_HUES[i]}, 62%, 72%)`;
-      ctx.fill();
+    // Collect the faces whose transformed normal points up (+y = toward the
+    // overhead camera); for a convex solid these tile the silhouette exactly.
+    const visible = [];
+    for (let fi = 0; fi < rhombi.faces.length; fi++) {
+      const face = rhombi.faces[fi];
+      const ny = this._n.copy(face.normal).applyQuaternion(q).y;
+      if (ny <= 0.0001) continue;
+      const pts = face.idxs.map((vi) => {
+        const v = this._v.copy(rhombi.vertices[vi]).applyQuaternion(q);
+        return [cx + v.x * scale, cy + v.z * scale];
+      });
+      // Depth = transformed centroid height; draw lowest first so the topmost
+      // faces land on top if any projected overlap occurs.
+      const cyd = this._v.copy(face.centroid).applyQuaternion(q).y;
+      visible.push({ pts, fi, depth: cyd });
     }
+    visible.sort((a, b) => a.depth - b.depth);
 
-    // Octagon outline.
-    ctx.beginPath();
-    for (let i = 0; i < N; i++) {
-      const a = base + (i * 2 * Math.PI) / N;
-      const x = cx + r * Math.cos(a);
-      const y = cy + r * Math.sin(a);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
+    for (const { pts, fi } of visible) {
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k][0], pts[k][1]);
+      ctx.closePath();
+      ctx.fillStyle = this._faceColors[fi];
+      ctx.fill();
+      ctx.lineWidth = Math.max(0.6, scale * 0.03);
+      ctx.strokeStyle = 'rgba(55,55,70,0.32)';
+      ctx.stroke();
     }
-    ctx.closePath();
-    ctx.lineWidth = Math.max(1, r * 0.06);
-    ctx.strokeStyle = 'rgba(55,55,70,0.4)';
-    ctx.stroke();
   }
 
   _roundRect(ctx, x, y, w, h, r) {
