@@ -484,9 +484,14 @@ export class Game {
     this.mapWalls = [];
     const wallHeight = 2 * this.apothem;
     const wallThickness = cellSize * 0.16;
+    // Extend each segment by one full thickness along its length (half past
+    // each end, since a BoxGeometry is centered on its position), so
+    // perpendicular segments meeting at a corner overlap into the shared
+    // corner square instead of leaving a hairline notch.
+    const segmentLength = blockStep + wallThickness;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x8a8fa6, roughness: 0.85 });
-    const hWallGeo = new THREE.BoxGeometry(wallThickness, wallHeight, blockStep);
-    const vWallGeo = new THREE.BoxGeometry(blockStep, wallHeight, wallThickness);
+    const hWallGeo = new THREE.BoxGeometry(wallThickness, wallHeight, segmentLength);
+    const vWallGeo = new THREE.BoxGeometry(segmentLength, wallHeight, wallThickness);
 
     const addWallSegment = (geo, x, z) => {
       const wall = new THREE.Mesh(geo, wallMat);
