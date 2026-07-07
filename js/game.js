@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js';
 import { generateMaze, buildBlockGrid, findPath, bfsFarthest } from './maze.js';
+import { Renderer2D } from './renderer2d.js';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -57,16 +58,19 @@ const CAMERA_DRAG_TAU_MS = 40;
 export class Game {
   constructor(canvas, { onStats } = {}) {
     this.canvas = canvas;
+    this.canvas2d = document.getElementById('scene2d');
     this.onStats = onStats || (() => {});
     this.running = true;
     this.mode = 'auto';
     this.gameType = 'track';
+    this.view = '3d';
     this.pendingGapMs = 0;
     this.manualDir = null;
 
     this._setupScene();
     this._setupShape();
     this._setupCameraControls();
+    this.renderer2d = this.canvas2d ? new Renderer2D(this.canvas2d, this) : null;
     this._setupTrackMode();
 
     this._resizeHandler = () => this._onResize();
@@ -90,6 +94,18 @@ export class Game {
   toggle() {
     this.running = !this.running;
     return this.running;
+  }
+
+  // Swaps between the 3D WebGL view and the flat 2D top-down view. Both draw
+  // the same underlying game state; only the render target changes.
+  toggleView() {
+    if (!this.renderer2d) return this.view;
+    this.view = this.view === '3d' ? '2d' : '3d';
+    const is2d = this.view === '2d';
+    this.canvas.style.display = is2d ? 'none' : 'block';
+    this.canvas2d.style.display = is2d ? 'block' : 'none';
+    this._onResize();
+    return this.view;
   }
 
   toggleMode() {
@@ -644,6 +660,13 @@ export class Game {
   }
 
   _onKeyDown(e) {
+    // Alt+3 toggles between the 3D and 2D views.
+    if (e.altKey && (e.key === '3' || e.code === 'Digit3')) {
+      e.preventDefault();
+      this.toggleView();
+      return;
+    }
+
     const key = e.key;
     let kind = null;
     if (key === 'ArrowUp' || key === 'w' || key === 'W') kind = 'forward';
@@ -755,11 +778,16 @@ export class Game {
   }
 
   _onResize() {
-    const w = this.canvas.clientWidth || window.innerWidth;
-    const h = this.canvas.clientHeight || window.innerHeight;
+    // Measure the container rather than a canvas, since the hidden view's
+    // canvas reports a zero client size.
+    const host = this.canvas.parentElement || this.canvas;
+    const rect = host.getBoundingClientRect();
+    const w = Math.round(rect.width) || window.innerWidth;
+    const h = Math.round(rect.height) || window.innerHeight;
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    if (this.renderer2d) this.renderer2d.resize(w, h);
   }
 
   _tick(now) {
@@ -792,7 +820,11 @@ export class Game {
       this._reportStats();
     }
 
-    this._updateCamera(dt);
-    this.renderer.render(this.scene, this.camera);
+    if (this.view === '2d' && this.renderer2d) {
+      this.renderer2d.render();
+    } else {
+      this._updateCamera(dt);
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 }

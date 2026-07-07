@@ -19,12 +19,17 @@ html, body {
   height: 100%;
 }
 
-#scene {
+#scene,
+#scene2d {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   display: block;
+}
+
+#scene2d {
+  display: none;
 }
 
 #hud {
