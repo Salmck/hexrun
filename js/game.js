@@ -465,48 +465,43 @@ export class Game {
     this.scene.add(ground);
     this.mapGround = ground;
 
-    // Walls are rendered as thin partitions sitting exactly on the boundary
-    // between an open block and a closed neighbor - not as a box filling
-    // the closed block's whole footprint. A filled block would either have
-    // to match the corridor's width (reading as just as "wide" as the
-    // path) or leave a visible, illogical gap around a thinner box (open-
-    // looking floor that's actually still blocked).
+    // Walls are built one box per closed block, sized against that block's
+    // own true footprint - but pulled back by the shape's apothem on
+    // whichever sides face an OPEN neighbor, so the shape never overhangs
+    // into a wall it's rolling past. Sides facing another closed block (or
+    // the maze boundary) stay flush at the true footprint edge, which is
+    // what keeps neighboring closed blocks merged into one solid mass with
+    // no gaps or seams between them.
     this.mapWalls = [];
     const wallHeight = 2 * this.apothem;
-    const wallThickness = cellSize * 0.16;
-    const segmentLength = MAZE_RATIO * cellSize;
+    const halfBlock = (MAZE_RATIO * cellSize) / 2;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0x8a8fa6, roughness: 0.85 });
-    const hWallGeo = new THREE.BoxGeometry(wallThickness, wallHeight, segmentLength);
-    const vWallGeo = new THREE.BoxGeometry(segmentLength, wallHeight, wallThickness);
 
     const blockCenter = (bx, by) => ({
       fx: bx * MAZE_RATIO + (MAZE_RATIO - 1) / 2,
       fy: by * MAZE_RATIO + (MAZE_RATIO - 1) / 2,
     });
-    const addWallSegment = (geo, x, z) => {
-      const wall = new THREE.Mesh(geo, wallMat);
-      wall.position.set(x, wallHeight / 2, z);
-      this.scene.add(wall);
-      this.mapWalls.push(wall);
-    };
 
     for (let by = 0; by < this.fineGrid.blocksY; by++) {
       for (let bx = 0; bx < this.fineGrid.blocksX; bx++) {
-        if (!this.fineGrid.blockOpen(bx, by)) continue;
+        if (this.fineGrid.blockOpen(bx, by)) continue;
         const c = blockCenter(bx, by);
         const cx = this._mapWorldX(c.fx);
         const cz = this._mapWorldZ(c.fy);
 
-        for (const [dx, dy] of [[1, 0], [-1, 0]]) {
-          if (this.fineGrid.blockOpen(bx + dx, by + dy)) continue;
-          const nc = blockCenter(bx + dx, by + dy);
-          addWallSegment(hWallGeo, (cx + this._mapWorldX(nc.fx)) / 2, cz);
-        }
-        for (const [dx, dy] of [[0, 1], [0, -1]]) {
-          if (this.fineGrid.blockOpen(bx + dx, by + dy)) continue;
-          const nc = blockCenter(bx + dx, by + dy);
-          addWallSegment(vWallGeo, cx, (cz + this._mapWorldZ(nc.fy)) / 2);
-        }
+        const leftExtent = halfBlock - (this.fineGrid.blockOpen(bx - 1, by) ? this.apothem : 0);
+        const rightExtent = halfBlock - (this.fineGrid.blockOpen(bx + 1, by) ? this.apothem : 0);
+        const nearExtent = halfBlock - (this.fineGrid.blockOpen(bx, by - 1) ? this.apothem : 0);
+        const farExtent = halfBlock - (this.fineGrid.blockOpen(bx, by + 1) ? this.apothem : 0);
+        const width = leftExtent + rightExtent;
+        const depth = nearExtent + farExtent;
+        if (width <= 0 || depth <= 0) continue;
+
+        const geo = new THREE.BoxGeometry(width, wallHeight, depth);
+        const wall = new THREE.Mesh(geo, wallMat);
+        wall.position.set(cx + (rightExtent - leftExtent) / 2, wallHeight / 2, cz + (farExtent - nearExtent) / 2);
+        this.scene.add(wall);
+        this.mapWalls.push(wall);
       }
     }
 
