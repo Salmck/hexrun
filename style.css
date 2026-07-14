@@ -1,0 +1,157 @@
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: #14181f;
+  color: #ece6df;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+
+#app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+#scene,
+#scene2d {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#scene2d {
+  display: none;
+}
+
+#hud {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 18px 24px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(10, 12, 16, 0.65), transparent);
+}
+
+#hud h1 {
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.02em;
+  color: #f3ead2;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+#stats {
+  display: flex;
+  gap: 20px;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  min-width: 64px;
+}
+
+.stat .label {
+  font-size: 11px;
+  color: #b9c4d6;
+  opacity: 0.85;
+}
+
+.stat .value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #e8b7a0;
+  font-variant-numeric: tabular-nums;
+}
+
+#controls {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  background: rgba(20, 24, 31, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  padding: 8px 12px;
+  border-radius: 999px;
+}
+
+#controls button {
+  appearance: none;
+  border: none;
+  background: #c9b8d8;
+  color: #201a26;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+#controls button:hover {
+  filter: brightness(1.08);
+}
+
+#controls button:active {
+  filter: brightness(0.95);
+}
+
+#btn-gametype {
+  background: #b3c2a8 !important;
+}
+
+#btn-mode {
+  background: #ead9c9 !important;
+}
+
+#btn-reset {
+  background: #b9c4d6 !important;
+}
+
+#speed-label {
+  font-size: 12px;
+  color: #d8d2c8;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 4px;
+}
+
+#speed-label select {
+  background: rgba(0, 0, 0, 0.3);
+  color: #ece6df;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  #hud {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  #stats {
+    gap: 14px;
+  }
+}

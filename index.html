@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>翻滚多面体 · 障碍模拟</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.min.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <canvas id="scene"></canvas>
+    <canvas id="scene2d"></canvas>
+
+    <header id="hud">
+      <h1>小斜方立方八面体 · 翻滚障碍模拟</h1>
+      <div id="stats">
+        <div class="stat"><span id="label-a" class="label">前进格数</span><span id="stat-a" class="value">0</span></div>
+        <div class="stat"><span id="label-b" class="label">躲避次数</span><span id="stat-b" class="value">0</span></div>
+      </div>
+    </header>
+
+    <div id="controls">
+      <button id="btn-toggle" type="button">暂停</button>
+      <button id="btn-gametype" type="button">赛道模式</button>
+      <button id="btn-mode" type="button">模式：自动</button>
+      <button id="btn-reset" type="button">重置</button>
+      <label id="speed-label">
+        速度
+        <select id="speed">
+          <option value="slow">慢</option>
+          <option value="normal" selected>正常</option>
+          <option value="fast">快</option>
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
