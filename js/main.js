@@ -1,4 +1,4 @@
-import { Game } from './game.js';
+import { Game } from './game.js?v=37';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -7,31 +7,23 @@ const statAEl = document.getElementById('stat-a');
 const statBEl = document.getElementById('stat-b');
 const toggleBtn = document.getElementById('btn-toggle');
 const gametypeBtn = document.getElementById('btn-gametype');
-const modeBtn = document.getElementById('btn-mode');
+const mapStrategyBtn = document.getElementById('btn-map-strategy');
 const resetBtn = document.getElementById('btn-reset');
 const speedSelect = document.getElementById('speed');
-
-const MAP_STATUS_TEXT = {
-  solving: '寻路中',
-  reached: '已到达!',
-  stuck: '无法到达',
-};
+const racerCountSelect = document.getElementById('racer-count');
 
 const game = new Game(canvas, {
   onStats: (stats) => {
     if (stats.gameType === 'track') {
-      labelAEl.textContent = '前进格数';
-      labelBEl.textContent = '躲避次数';
-      statAEl.textContent = stats.distance;
-      statBEl.textContent = stats.dodges;
+      labelAEl.textContent = '比赛进度';
+      labelBEl.textContent = '完赛情况';
+      statAEl.textContent = `${stats.leaderDistance}/${stats.trackLength}`;
+      statBEl.textContent = `${stats.finished}/${stats.racers}`;
     } else {
-      labelAEl.textContent = '已走步数';
-      labelBEl.textContent = '状态';
-      statAEl.textContent = stats.steps;
-      statBEl.textContent =
-        stats.status === 'solving' && stats.mode === 'manual'
-          ? '手动驾驶'
-          : MAP_STATUS_TEXT[stats.status];
+      labelAEl.textContent = '到达终点';
+      labelBEl.textContent = '总步数';
+      statAEl.textContent = `${stats.finished}/${stats.racers}`;
+      statBEl.textContent = stats.steps;
     }
   },
 });
@@ -46,11 +38,14 @@ toggleBtn.addEventListener('click', () => {
 gametypeBtn.addEventListener('click', () => {
   const type = game.switchGameType(game.gameType === 'track' ? 'map' : 'track');
   gametypeBtn.textContent = type === 'track' ? '赛道模式' : '地图模式';
+  mapStrategyBtn.hidden = type !== 'map';
+  racerCountSelect.max = String(game.getMaxRacers());
+  racerCountSelect.value = String(game.racerCount);
 });
 
-modeBtn.addEventListener('click', () => {
-  const mode = game.toggleMode();
-  modeBtn.textContent = mode === 'auto' ? '模式：自动' : '模式：手动';
+mapStrategyBtn.addEventListener('click', () => {
+  const strategy = game.toggleMapStrategy();
+  mapStrategyBtn.textContent = strategy === 'path' ? 'A* 寻路' : '自主探索';
 });
 
 resetBtn.addEventListener('click', () => {
@@ -64,3 +59,11 @@ resetBtn.addEventListener('click', () => {
 speedSelect.addEventListener('change', () => {
   game.setSpeed(speedSelect.value);
 });
+
+const applyRacerCount = () => {
+  if (racerCountSelect.value === '') return;
+  const count = game.setRacerCount(Number(racerCountSelect.value));
+  racerCountSelect.value = String(count);
+};
+racerCountSelect.addEventListener('input', applyRacerCount);
+racerCountSelect.addEventListener('change', applyRacerCount);

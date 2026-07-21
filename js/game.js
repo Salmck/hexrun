@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js';
-import { generateMaze, buildBlockGrid, findPath, bfsFarthest } from './maze.js';
-import { Renderer2D } from './renderer2d.js';
+import { findPath, generateObstacleGrid } from './maze.js?v=25';
+import { Renderer2D } from './renderer2d.js?v=30';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -11,8 +11,6 @@ const RIGHT = new THREE.Vector3(1, 0, 0);
 const UP = new THREE.Vector3(0, 1, 0);
 const PITCH_AXIS = new THREE.Vector3(1, 0, 0);
 
-// fx/fy deltas for each move kind, shared by manual input validation and
-// by the auto A* stepper in map mode.
 const MAP_DIR_DELTAS = {
   forward: { dx: 0, dy: -1, vec: FORWARD },
   back: { dx: 0, dy: 1, vec: BACKWARD },
@@ -21,30 +19,33 @@ const MAP_DIR_DELTAS = {
 };
 
 const SPEED_PRESETS = {
-  slow: { tumbleDuration: 400, pauseBetween: 100, moveGap: 300 },
-  normal: { tumbleDuration: 260, pauseBetween: 60, moveGap: 150 },
-  fast: { tumbleDuration: 150, pauseBetween: 30, moveGap: 60 },
+  slow: { tumbleDuration: 130, pauseBetween: 25, moveGap: 45 },
+  normal: { tumbleDuration: 80, pauseBetween: 14, moveGap: 22 },
+  fast: { tumbleDuration: 45, pauseBetween: 7, moveGap: 9 },
 };
 
-const LANES = [-1, 0, 1];
+const TRACK_LANE_COUNT = 16;
+const MAX_RACERS = Math.floor(TRACK_LANE_COUNT / 2);
+const MAP_MAX_RACERS = 20;
+const TRACK_LENGTH = 120;
+const TRACK_LANES = Array.from({ length: TRACK_LANE_COUNT }, (_, i) => i);
 // A curated "caution" family (warm, saturated) so obstacles always pop
 // against both the pastel shape and the light road, instead of a
 // narrow-hue random HSL that read as muddy on a dark background.
 const OBSTACLE_COLORS = [0xe8604f, 0xf0a03c, 0xd94f7a];
-const OBSTACLE_CHANCE = 0.6;
-const SAFE_START_ROWS = 4;
-const GEN_BATCH = 30;
-const MIN_OBSTACLE_EDGE_GAP = 4; // obstacles kept >= 4 edge-lengths apart
+const SAFE_START_ROWS = 8;
+const SAFE_FINISH_ROWS = 6;
+const RACER_COLORS = [0xf28b82, 0xfbbc04, 0xffd666, 0x81c995, 0x78d9ec, 0x8ab4f8, 0xc58af9, 0xf07bb5];
 
 // Each maze room/passage is expanded into MAZE_RATIO x MAZE_RATIO movement
 // cells, so every corridor is MAZE_RATIO steps wide - at MAZE_RATIO=2 that's
 // 2x the forward step, i.e. 4 edge-lengths, since one step is always
 // exactly 2 edge-lengths.
-const MAZE_COARSE_SIZE = 5;
 const MAZE_RATIO = 2;
+const MAP_SIZE = 21;
 
-const CAMERA_RADIUS_MIN = 7;
-const CAMERA_RADIUS_MAX = 140;
+const CAMERA_RADIUS_MIN = 3;
+const CAMERA_RADIUS_MAX = 420;
 const CAMERA_RADIUS_DEFAULT = 25;
 const CAMERA_ELEVATION_DEFAULT = 0.5; // radians above horizontal
 const CAMERA_ELEVATION_MIN = 0.06; // just above ground level
@@ -54,6 +55,8 @@ const TILT_SPEED = 0.006;
 const ZOOM_LOG_SPEED = 0.0022; // multiplicative zoom - constant feel across the whole range
 const CAMERA_FOLLOW_TAU_MS = 190; // exponential smoothing time-constant
 const CAMERA_DRAG_TAU_MS = 40;
+const CAMERA_RETURN_DELAY_MS = 5000;
+const CAMERA_LOOK_AHEAD_ROWS = 4;
 
 export class Game {
   constructor(canvas, { onStats } = {}) {
@@ -61,11 +64,12 @@ export class Game {
     this.canvas2d = document.getElementById('scene2d');
     this.onStats = onStats || (() => {});
     this.running = true;
-    this.mode = 'auto';
     this.gameType = 'track';
     this.view = '3d';
     this.pendingGapMs = 0;
-    this.manualDir = null;
+    this.racerCount = 4;
+    this.mapStrategy = 'path';
+    this._cameraManualUntil = 0;
 
     this._setupScene();
     this._setupShape();
@@ -85,15 +89,56 @@ export class Game {
   }
 
   setSpeed(name) {
+    this.speedName = name;
     const preset = SPEED_PRESETS[name] || SPEED_PRESETS.normal;
     this.shape.tumbleDuration = preset.tumbleDuration;
     this.shape.pauseBetween = preset.pauseBetween;
     this.moveGap = preset.moveGap;
+    if (this.trackRacers) {
+      for (const racer of this.trackRacers) {
+        racer.shape.tumbleDuration = preset.tumbleDuration;
+        racer.shape.pauseBetween = preset.pauseBetween;
+      }
+    }
+    if (this.mapRacers) {
+      for (const racer of this.mapRacers) {
+        racer.shape.tumbleDuration = preset.tumbleDuration;
+        racer.shape.pauseBetween = preset.pauseBetween;
+      }
+    }
+  }
+
+  setRacerCount(count) {
+    const nextCount = Math.max(1, Math.min(this.getMaxRacers(), Math.round(count) || 1));
+    if (nextCount === this.racerCount) return this.racerCount;
+    this.racerCount = nextCount;
+    this.reset();
+    return this.racerCount;
+  }
+
+  getMaxRacers() {
+    return this.gameType === 'map' ? MAP_MAX_RACERS : MAX_RACERS;
   }
 
   toggle() {
     this.running = !this.running;
     return this.running;
+  }
+
+  toggleMapStrategy() {
+    this.mapStrategy = this.mapStrategy === 'path' ? 'explore' : 'path';
+    if (this.gameType === 'map') {
+      for (const racer of this.mapRacers) {
+        racer.path = null;
+        racer.pathIndex = 0;
+        racer.blockedAttempts = 0;
+        racer.avoidCell = null;
+        racer.avoidSteps = 0;
+        racer.visitCounts = new Map([[`${racer.bx},${racer.by}`, 1]]);
+        this._updateMapPathDots(racer, null);
+      }
+    }
+    return this.mapStrategy;
   }
 
   // Swaps between the 3D WebGL view and the flat 2D top-down view. Both draw
@@ -108,13 +153,6 @@ export class Game {
     return this.view;
   }
 
-  toggleMode() {
-    this.mode = this.mode === 'auto' ? 'manual' : 'auto';
-    this.pendingGapMs = 0;
-    if (this.gameType === 'map' && this.mode === 'auto') this.mapPath = null;
-    return this.mode;
-  }
-
   // Switches between the endless-runner "track" mode and the maze-goal
   // "map" mode, tearing down whichever mode's scene objects are currently
   // present and building the other's fresh.
@@ -124,20 +162,20 @@ export class Game {
     else this._teardownMapMode();
 
     this.gameType = type;
+    this.racerCount = Math.min(this.racerCount, this.getMaxRacers());
     this.pendingGapMs = 0;
-    this.manualDir = null;
 
     if (type === 'track') this._setupTrackMode();
     else this._setupMapMode();
 
-    this._camTarget.set(0, this.apothem, 0);
+    this._cameraManualUntil = 0;
+    if (type === 'map') this._camTarget.set(0, this.apothem, 0);
     this._reportStats();
     return this.gameType;
   }
 
   reset() {
     this.pendingGapMs = 0;
-    this.manualDir = null;
     if (this.gameType === 'track') {
       this._teardownTrackMode();
       this._setupTrackMode();
@@ -145,7 +183,8 @@ export class Game {
       this._teardownMapMode();
       this._setupMapMode();
     }
-    this._camTarget.set(0, this.apothem, 0);
+    this._cameraManualUntil = 0;
+    if (this.gameType === 'map') this._camTarget.set(0, this.apothem, 0);
     this._reportStats();
   }
 
@@ -161,16 +200,17 @@ export class Game {
     if (this.gameType === 'track') {
       this.onStats({
         gameType: 'track',
-        distance: this.distance,
-        dodges: this.dodges,
-        mode: this.mode,
+        leaderDistance: Math.max(0, ...this.trackRacers.map((r) => r.row)),
+        trackLength: TRACK_LENGTH,
+        finished: this.trackRacers.filter((r) => r.finished).length,
+        racers: this.trackRacers.length,
       });
     } else {
       this.onStats({
         gameType: 'map',
-        steps: this.mapSteps,
-        status: this.mapStatus,
-        mode: this.mode,
+        steps: this.mapRacers.reduce((sum, racer) => sum + racer.steps, 0),
+        finished: this.mapRacers.filter((racer) => racer.status === 'reached').length,
+        racers: this.mapRacers.length,
       });
     }
   }
@@ -192,10 +232,10 @@ export class Game {
     // scene read as dim regardless of any one object's color.
     const skyColor = 0xdbe7f0;
     scene.background = new THREE.Color(skyColor);
-    scene.fog = new THREE.Fog(skyColor, 40, 260);
+    scene.fog = new THREE.Fog(skyColor, 70, 700);
     this.scene = scene;
 
-    const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 320);
+    const camera = new THREE.PerspectiveCamera(52, 1, 0.1, 1400);
     this.camera = camera;
 
     const hemi = new THREE.HemisphereLight(0xfff8ee, 0xaab2c0, 0.95);
@@ -279,10 +319,8 @@ export class Game {
     const v0 = this.rhombi.vertices[primary.idxs[0]];
     const v1 = this.rhombi.vertices[primary.idxs[1]];
     this.edgeLength = v0.distanceTo(v1);
-    this.minObstacleRowGap = Math.max(
-      1,
-      Math.ceil((MIN_OBSTACLE_EDGE_GAP * this.edgeLength) / this.forwardStep)
-    );
+    // One unit is exactly four solid edge lengths expressed as logical rows.
+    this.obstacleGapUnitRows = Math.max(1, Math.round((4 * this.edgeLength) / this.forwardStep));
   }
 
   _measureStep(dir, axis) {
@@ -300,144 +338,302 @@ export class Game {
   }
 
   // ---------------------------------------------------------------------
-  // Track mode: endless straight run with random obstacles to dodge.
+  // Track mode: a finite 16-lane autonomous race.
   // ---------------------------------------------------------------------
 
   _setupTrackMode() {
-    this.distance = 0;
-    this.dodges = 0;
-    this.rowIndex = 0;
-    this.laneIndex = 0;
-    this.obstaclesByRow = new Map(); // row -> { lane, mesh, shadow }
-    this.generatedUntilRow = 0;
-    this.lastObstacleRow = -Infinity;
-
-    const laneCount = LANES.length;
-    // Dividers sit at +-0.5 lane-widths, so the road needs to be exactly
-    // laneCount lane-widths wide for all three strips (including the two
-    // outer ones) to come out equal.
-    const trackWidth = (this.laneWidth || 4) * laneCount;
-    const groundGeo = new THREE.PlaneGeometry(trackWidth, 4000, 1, 1);
+    if (this.cameraOrbit) {
+      this.cameraOrbit.theta = 0;
+      this.cameraOrbit.elevation = 0.46;
+      this.cameraOrbit.radius = 168;
+    }
+    this.finishOrder = [];
+    this.trackLength = TRACK_LENGTH;
+    this.obstacles = [];
+    this.trackRacers = [];
+    const trackWidth = this.laneWidth * TRACK_LANE_COUNT;
+    const trackWorldLength = TRACK_LENGTH * this.forwardStep;
+    const groundGeo = new THREE.PlaneGeometry(trackWidth, trackWorldLength + this.forwardStep * 2);
     const groundMat = new THREE.MeshStandardMaterial({
       color: 0xa3aab8,
       roughness: 0.95,
     });
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
-    ground.position.set(0, 0, -1900);
+    ground.position.set(0, 0, -trackWorldLength / 2);
     this.scene.add(ground);
     this.ground = ground;
 
-    const dividerGeo = new THREE.BoxGeometry(0.08, 0.02, 4000);
+    const dividerGeo = new THREE.BoxGeometry(0.08, 0.02, trackWorldLength);
     const dividerMat = new THREE.MeshStandardMaterial({
       color: 0xf6f3ec,
       roughness: 0.8,
     });
-    this.trackDividers = [-0.5, 0.5].map((offset) => {
+    this.trackDividers = Array.from({ length: TRACK_LANE_COUNT - 1 }, (_, i) => i + 0.5).map((boundary) => {
       const divider = new THREE.Mesh(dividerGeo, dividerMat);
-      divider.position.set(offset * this.laneWidth, 0.011, -1900);
+      divider.position.set(this._laneX(boundary), 0.011, -trackWorldLength / 2);
       this.scene.add(divider);
       return divider;
     });
 
-    this._ensureObstaclesGenerated(this.rowIndex + GEN_BATCH);
+    this._addRaceLine(0, false);
+    this._addRaceLine(TRACK_LENGTH, true);
+    this._generateTrackObstacles();
 
-    this.shape.group.position.set(0, this.apothem, 0);
-    this.shape.group.quaternion.identity();
-    this.shape.phase = 'idle';
+    const startLanes = Array.from({ length: this.racerCount }, (_, i) =>
+      Math.round(i * (TRACK_LANE_COUNT - 1) / Math.max(1, this.racerCount - 1))
+    );
+    for (let i = 0; i < this.racerCount; i++) {
+      let group;
+      let shadow;
+      let rolling;
+      if (i === 0) {
+        group = this.shape.group;
+        shadow = this.shapeShadow;
+        rolling = this.shape;
+      } else {
+        group = buildMesh(this.rhombi);
+        this._tintShape(group, RACER_COLORS[i % RACER_COLORS.length]);
+        this.scene.add(group);
+        shadow = this._makeBlobShadow(this.apothem * 1.15);
+        this.scene.add(shadow);
+        rolling = new RollingShape(this.rhombi, group);
+      }
+      const racer = {
+        id: i,
+        shape: rolling,
+        shadow,
+        lane: startLanes[i],
+        row: 0,
+        dodges: 0,
+        // All racers line up on the same start line, then launch in short
+        // waves. The gap lets the previous racer clear the full 3x3 safety
+        // envelope before the next one begins moving.
+        pendingGapMs: 0,
+        finished: false,
+        place: null,
+        target: null,
+        avoidDirection: 0,
+        lastBlocked: null,
+        stuckFrames: 0,
+        finishLane: null,
+      };
+      rolling.onMoveComplete = () => { racer.pendingGapMs = this.moveGap; racer.target = null; };
+      group.position.set(this._laneX(racer.lane), this.apothem, 0);
+      group.quaternion.identity();
+      rolling.phase = 'idle';
+      shadow.position.set(group.position.x, 0.02, 0);
+      this.trackRacers.push(racer);
+    }
+    this._camTarget.set(0, this.apothem, -CAMERA_LOOK_AHEAD_ROWS * this.forwardStep);
+    this.setSpeed(this.speedName || 'normal');
+  }
+
+  _laneX(lane) {
+    return (lane - (TRACK_LANE_COUNT - 1) / 2) * this.laneWidth;
+  }
+
+  _tintShape(group, hex) {
+    const mesh = group.children[0];
+    if (!mesh?.geometry?.attributes?.color) return;
+    const base = new THREE.Color(hex);
+    const attr = mesh.geometry.attributes.color.clone();
+    mesh.geometry = mesh.geometry.clone();
+    mesh.geometry.setAttribute('color', attr);
+    for (let i = 0; i < attr.count; i++) {
+      const variation = 0.78 + (i % 7) * 0.035;
+      attr.setXYZ(i, base.r * variation, base.g * variation, base.b * variation);
+    }
+    attr.needsUpdate = true;
+  }
+
+  _addRaceLine(row, checker) {
+    const width = this.laneWidth * TRACK_LANE_COUNT;
+    const depth = this.forwardStep * 0.34;
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    const cells = 40;
+    for (let i = 0; i < cells; i++) {
+      ctx.fillStyle = checker && i % 2 ? '#15181f' : '#ffffff';
+      ctx.fillRect((i * canvas.width) / cells, 0, canvas.width / cells + 1, canvas.height);
+    }
+    const mat = new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas) });
+    const line = new THREE.Mesh(new THREE.PlaneGeometry(width, depth), mat);
+    line.rotation.x = -Math.PI / 2;
+    line.position.set(0, 0.035, -row * this.forwardStep);
+    this.scene.add(line);
+    if (!this.raceLines) this.raceLines = [];
+    this.raceLines.push(line);
   }
 
   _teardownTrackMode() {
     this.scene.remove(this.ground);
     for (const d of this.trackDividers) this.scene.remove(d);
-    for (const { mesh, shadow } of this.obstaclesByRow.values()) {
+    for (const line of this.raceLines || []) this.scene.remove(line);
+    this.raceLines = [];
+    for (const { mesh, shadow } of this.obstacles) {
       this.scene.remove(mesh);
       this.scene.remove(shadow);
     }
-    this.obstaclesByRow.clear();
+    for (const racer of this.trackRacers.slice(1)) {
+      this.scene.remove(racer.shape.group);
+      this.scene.remove(racer.shadow);
+    }
   }
 
-  _ensureObstaclesGenerated(untilRow) {
-    const laneWidth = this.laneWidth;
+  _generateTrackObstacles() {
     const obstacleHeight = 2 * this.apothem;
-    // Square footprint, and narrow enough that its inner edge clears the
-    // rolling shape's own resting bounding width (2x apothem) with a
-    // visible gap - at 0.8 lane-widths it was wide enough to graze the
-    // shape as it rolled past in an adjacent lane.
-    const obstacleSize = laneWidth * 0.5;
-    const boxGeo = new THREE.BoxGeometry(obstacleSize, obstacleHeight, obstacleSize);
-    for (let row = this.generatedUntilRow + 1; row <= untilRow; row++) {
-      const farEnoughFromLast = row - this.lastObstacleRow >= this.minObstacleRowGap;
-      if (row > SAFE_START_ROWS && farEnoughFromLast && Math.random() < OBSTACLE_CHANCE) {
-        const lane = LANES[Math.floor(Math.random() * LANES.length)];
+    for (
+      let row = SAFE_START_ROWS;
+      row < TRACK_LENGTH - SAFE_FINISH_ROWS;
+      row += this.obstacleGapUnitRows * (2 + Math.floor(Math.random() * 2))
+    ) {
+      const occupied = new Set();
+      const count = 1 + Math.floor(Math.random() * 2);
+      for (let k = 0; k < count; k++) {
+        const span = 1 + Math.floor(Math.random() * 4);
+        const starts = TRACK_LANES.filter((lane) => lane + span <= TRACK_LANE_COUNT &&
+          Array.from({ length: span }, (_, n) => lane + n).every((l) => !occupied.has(l)));
+        if (!starts.length || occupied.size + span > TRACK_LANE_COUNT - 4) continue;
+        const laneStart = starts[Math.floor(Math.random() * starts.length)];
+        for (let n = 0; n < span; n++) occupied.add(laneStart + n);
+        const width = this.laneWidth * 0.5 + (span - 1) * this.laneWidth;
+        const depth = this.forwardStep * (0.28 + Math.random() * 0.24);
+        const boxGeo = new THREE.BoxGeometry(width, obstacleHeight, depth);
         const base = OBSTACLE_COLORS[Math.floor(Math.random() * OBSTACLE_COLORS.length)];
         const color = new THREE.Color(base);
-        const jitter = 0.9 + Math.random() * 0.2;
-        color.multiplyScalar(jitter);
-        const mat = new THREE.MeshStandardMaterial({
-          color,
-          roughness: 0.45,
-        });
+        color.multiplyScalar(0.9 + Math.random() * 0.2);
+        const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.45 });
         const mesh = new THREE.Mesh(boxGeo, mat);
+        const laneCenter = laneStart + (span - 1) / 2;
         const z = -row * this.forwardStep;
-        mesh.position.set(lane * laneWidth, obstacleHeight / 2, z);
+        mesh.position.set(this._laneX(laneCenter), obstacleHeight / 2, z);
         this.scene.add(mesh);
-
-        const shadow = this._makeBlobShadow(obstacleSize * 0.7);
-        shadow.position.set(lane * laneWidth, 0.02, z);
+        const shadow = this._makeBlobShadow(Math.max(width, depth) * 0.58);
+        shadow.scale.set(width / Math.max(width, depth), depth / Math.max(width, depth), 1);
+        shadow.position.set(mesh.position.x, 0.02, z);
         this.scene.add(shadow);
-
-        this.obstaclesByRow.set(row, { lane, mesh, shadow });
-        this.lastObstacleRow = row;
-      }
-    }
-    this.generatedUntilRow = untilRow;
-
-    // cull obstacles well behind the shape
-    for (const [row, entry] of this.obstaclesByRow.entries()) {
-      if (row < this.rowIndex - 6) {
-        this.scene.remove(entry.mesh);
-        this.scene.remove(entry.shadow);
-        this.obstaclesByRow.delete(row);
+        this.obstacles.push({ laneStart, laneEnd: laneStart + span - 1, rowStart: row, rowEnd: row, mesh, shadow });
       }
     }
   }
 
   _isTrackBlocked(row, lane) {
-    const entry = this.obstaclesByRow.get(row);
-    return !!entry && entry.lane === lane;
+    return this.obstacles.some((o) => row >= o.rowStart && row <= o.rowEnd && lane >= o.laneStart && lane <= o.laneEnd);
   }
 
-  _decideNextMoveTrack() {
-    const nextRow = this.rowIndex + 1;
-    const blocked = this.obstaclesByRow.get(nextRow);
+  _racerOccupies(row, lane, except) {
+    return this.trackRacers.some((r) => r !== except &&
+      ((Math.abs(r.row - row) <= 1 && Math.abs(r.lane - lane) <= 1) ||
+       (r.target && Math.abs(r.target.row - row) <= 1 && Math.abs(r.target.lane - lane) <= 1)));
+  }
 
-    if (blocked && blocked.lane === this.laneIndex) {
-      // A sideways tumble doesn't change row, so the only thing that can
-      // stop it is an obstacle sitting in the destination lane at the
-      // *current* row - check both candidate lanes rather than assuming
-      // whichever one isn't the forced "toward center" choice is clear.
-      const candidates =
-        this.laneIndex === -1
-          ? [{ dir: RIGHT, lane: 0 }]
-          : this.laneIndex === 1
-          ? [{ dir: LEFT, lane: 0 }]
-          : Math.random() < 0.5
-          ? [{ dir: LEFT, lane: -1 }, { dir: RIGHT, lane: 1 }]
-          : [{ dir: RIGHT, lane: 1 }, { dir: LEFT, lane: -1 }];
-      const choice = candidates.find((c) => !this._isTrackBlocked(this.rowIndex, c.lane));
-      if (!choice) return; // boxed in on both sides - sit tight
+  _sideHasEscape(racer, sign) {
+    for (let lane = racer.lane + sign; lane >= 0 && lane < TRACK_LANE_COUNT; lane += sign) {
+      if (this._isTrackBlocked(racer.row, lane)) return -1;
+      if (!this._isTrackBlocked(racer.row + 1, lane)) return Math.abs(lane - racer.lane);
+    }
+    return -1;
+  }
 
-      this.laneIndex = choice.lane;
-      this.dodges += 1;
-      this.shape.startMove(choice.dir);
+  _assignFinishLane(racer) {
+    if (racer.finishLane !== null) return racer.finishLane;
+    const reserved = this.trackRacers
+      .filter((other) => other !== racer && other.finishLane !== null)
+      .map((other) => other.finishLane);
+    const candidates = TRACK_LANES
+      .filter((lane) => reserved.every((taken) => Math.abs(taken - lane) > 1))
+      .sort((a, b) => Math.abs(a - racer.lane) - Math.abs(b - racer.lane));
+    racer.finishLane = candidates[0] ?? racer.lane;
+    return racer.finishLane;
+  }
+
+  _decideNextMoveTrack(racer) {
+    if (racer.finished) return;
+    if (racer.row >= TRACK_LENGTH) {
+      racer.finished = true;
+      racer.place = this.finishOrder.length + 1;
+      this.finishOrder.push(racer.id);
       return;
     }
-
-    this.rowIndex += 1;
-    this.distance += 1;
-    this.shape.startMove(FORWARD);
-    this._ensureObstaclesGenerated(this.rowIndex + GEN_BATCH);
+    if (racer.row >= TRACK_LENGTH - SAFE_FINISH_ROWS) {
+      const finishLane = this._assignFinishLane(racer);
+      if (racer.lane !== finishLane) {
+        const sign = Math.sign(finishLane - racer.lane);
+        const lane = racer.lane + sign;
+        if (!this._isTrackBlocked(racer.row, lane) && !this._racerOccupies(racer.row, lane, racer)) {
+          racer.target = { row: racer.row, lane };
+          racer.lane = lane;
+          racer.avoidDirection = sign;
+          racer.stuckFrames = 0;
+          racer.shape.startMove(sign < 0 ? LEFT : RIGHT);
+        }
+        return;
+      }
+    }
+    const nextRow = racer.row + 1;
+    if (!this._isTrackBlocked(nextRow, racer.lane) && !this._racerOccupies(nextRow, racer.lane, racer)) {
+      racer.target = { row: nextRow, lane: racer.lane };
+      racer.row = nextRow;
+      racer.avoidDirection = 0;
+      racer.lastBlocked = null;
+      racer.stuckFrames = 0;
+      racer.shape.startMove(FORWARD);
+      return;
+    }
+    const obstacleAhead = this._isTrackBlocked(nextRow, racer.lane);
+    if (!obstacleAhead) {
+      const preferred = racer.id % 2 === 0 ? 1 : -1;
+      const yieldDirections = racer.avoidDirection ? [racer.avoidDirection] : [preferred, -preferred];
+      for (const sign of yieldDirections) {
+        const lane = racer.lane + sign;
+        if (lane < 0 || lane >= TRACK_LANE_COUNT) continue;
+        if (this._isTrackBlocked(racer.row, lane) || this._racerOccupies(racer.row, lane, racer)) continue;
+        racer.target = { row: racer.row, lane };
+        racer.lane = lane;
+        racer.avoidDirection = sign;
+        racer.stuckFrames = 0;
+        racer.shape.startMove(sign < 0 ? LEFT : RIGHT);
+        return;
+      }
+      racer.stuckFrames += 1;
+      return;
+    }
+    if (obstacleAhead && !racer.lastBlocked) {
+      racer.lastBlocked = { row: nextRow, lane: racer.lane };
+      const leftDistance = this._sideHasEscape(racer, -1);
+      const rightDistance = this._sideHasEscape(racer, 1);
+      if (leftDistance < 0) racer.avoidDirection = 1;
+      else if (rightDistance < 0) racer.avoidDirection = -1;
+      else racer.avoidDirection = leftDistance <= rightDistance ? -1 : 1;
+    }
+    const directions = racer.avoidDirection
+      ? [racer.avoidDirection]
+      : (Math.random() < 0.5 ? [-1, 1] : [1, -1]);
+    for (const sign of directions) {
+      const lane = racer.lane + sign;
+      if (lane < 0 || lane >= TRACK_LANE_COUNT) continue;
+      if (this._isTrackBlocked(racer.row, lane) || this._racerOccupies(racer.row, lane, racer)) continue;
+      racer.target = { row: racer.row, lane };
+      racer.lane = lane;
+      racer.dodges += 1;
+      racer.shape.startMove(sign < 0 ? LEFT : RIGHT);
+      racer.stuckFrames = 0;
+      return;
+    }
+    racer.stuckFrames += 1;
+    // Preserve the selected side during short traffic delays. If that side
+    // remains unavailable, deliberately re-plan once instead of reversing
+    // every frame and oscillating in front of the same obstacle.
+    if (racer.stuckFrames > 30) {
+      const opposite = -racer.avoidDirection;
+      if (opposite && this._sideHasEscape(racer, opposite) >= 0) {
+        racer.avoidDirection = opposite;
+      }
+      racer.stuckFrames = 0;
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -453,27 +649,39 @@ export class Game {
   // ~1.207 edge-length apothem. Flush, uniform walls are then always safe,
   // with no per-side inset or corner special-casing required.
   _setupMapMode() {
-    this.maze = generateMaze(MAZE_COARSE_SIZE, MAZE_COARSE_SIZE, Math.random);
-    this.blockGrid = buildBlockGrid(this.maze);
-    const { blockOpen, blocksX, blocksY } = this.blockGrid;
+    if (this.cameraOrbit) {
+      this.cameraOrbit.theta = 0;
+      this.cameraOrbit.elevation = 1.02;
+      this.cameraOrbit.radius = 190;
+    }
+    this.blockGrid = generateObstacleGrid(MAP_SIZE, MAP_SIZE, Math.random);
+    const { blockOpen, blocksX, blocksY, openCells, obstacleComponents } = this.blockGrid;
+    const center = { fx: (blocksX - 1) / 2, fy: (blocksY - 1) / 2 };
+    const goalCell = [...openCells].sort((a, b) =>
+      (Math.abs(a.fx - center.fx) + Math.abs(a.fy - center.fy)) -
+      (Math.abs(b.fx - center.fx) + Math.abs(b.fy - center.fy))
+    )[0];
+    this.mapGoal = { bx: goalCell.fx, by: goalCell.fy };
 
-    const pass1 = bfsFarthest(blockOpen, blocksX, { fx: 0, fy: 0 });
-    const pass2 = bfsFarthest(blockOpen, blocksX, pass1.point);
-    this.mapStart = { bx: pass1.point.fx, by: pass1.point.fy };
-    this.mapGoal = { bx: pass2.point.fx, by: pass2.point.fy };
-
-    this.bx = this.mapStart.bx;
-    this.by = this.mapStart.by;
-    this.mapPath = null;
-    this.mapPathIndex = 0;
-    this.mapPendingDir = null;
-    this.mapSteps = 0;
-    this.mapStatus = 'solving';
+    const starts = [];
+    for (let i = 0; i < this.racerCount; i++) {
+      let best = null;
+      let bestScore = -Infinity;
+      for (const cell of openCells) {
+        if (cell.fx === goalCell.fx && cell.fy === goalCell.fy) continue;
+        if (starts.some((start) => Math.abs(cell.fx - start.fx) + Math.abs(cell.fy - start.fy) <= 1)) continue;
+        const distances = [Math.abs(cell.fx - goalCell.fx) + Math.abs(cell.fy - goalCell.fy)];
+        for (const start of starts) distances.push(Math.abs(cell.fx - start.fx) + Math.abs(cell.fy - start.fy));
+        const score = Math.min(...distances);
+        if (score > bestScore) { bestScore = score; best = cell; }
+      }
+      starts.push({ fx: best.fx, fy: best.fy });
+    }
 
     const cellSize = this.forwardStep;
     const blockStep = MAZE_RATIO * cellSize; // world distance between adjacent block centers
-    this._mapWorldX = (bx) => (bx - this.mapStart.bx) * blockStep;
-    this._mapWorldZ = (by) => (by - this.mapStart.by) * blockStep;
+    this._mapWorldX = (bx) => (bx - (blocksX - 1) / 2) * blockStep;
+    this._mapWorldZ = (by) => (by - (blocksY - 1) / 2) * blockStep;
 
     const minX = this._mapWorldX(0) - blockStep / 2;
     const maxX = this._mapWorldX(blocksX - 1) + blockStep / 2;
@@ -491,47 +699,31 @@ export class Game {
     this.scene.add(ground);
     this.mapGround = ground;
 
-    // Walls are rendered as thin partitions sitting exactly on the boundary
-    // between an open block and a closed neighbor - not as a box filling
-    // the closed block's whole footprint. A filled block would either have
-    // to match the corridor's width (reading as just as "wide" as the
-    // path) or leave a visible, illogical gap around a thinner box (open-
-    // looking floor that's actually still blocked).
     this.mapWalls = [];
     const wallHeight = 2 * this.apothem;
-    const wallThickness = cellSize * 0.16;
-    // Extend each segment by one full thickness along its length (half past
-    // each end, since a BoxGeometry is centered on its position), so
-    // perpendicular segments meeting at a corner overlap into the shared
-    // corner square instead of leaving a hairline notch.
-    const segmentLength = blockStep + wallThickness;
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x8a8fa6, roughness: 0.85 });
-    const hWallGeo = new THREE.BoxGeometry(wallThickness, wallHeight, segmentLength);
-    const vWallGeo = new THREE.BoxGeometry(segmentLength, wallHeight, wallThickness);
-
-    const addWallSegment = (geo, x, z) => {
-      const wall = new THREE.Mesh(geo, wallMat);
-      wall.position.set(x, wallHeight / 2, z);
-      this.scene.add(wall);
-      this.mapWalls.push(wall);
-    };
-
-    for (let by = 0; by < blocksY; by++) {
-      for (let bx = 0; bx < blocksX; bx++) {
-        if (!blockOpen(bx, by)) continue;
-        const cx = this._mapWorldX(bx);
-        const cz = this._mapWorldZ(by);
-
-        for (const [dx, dy] of [[1, 0], [-1, 0]]) {
-          if (blockOpen(bx + dx, by + dy)) continue;
-          addWallSegment(hWallGeo, (cx + this._mapWorldX(bx + dx)) / 2, cz);
-        }
-        for (const [dx, dy] of [[0, 1], [0, -1]]) {
-          if (blockOpen(bx + dx, by + dy)) continue;
-          addWallSegment(vWallGeo, cx, (cz + this._mapWorldZ(by + dy)) / 2);
+    const wallThickness = cellSize * 0.15;
+    const wallPalette = [0x747b8e, 0x7f788c, 0x6f7f82, 0x85796f];
+    obstacleComponents.forEach((component, componentIndex) => {
+      const cells = new Set(component.map((p) => `${p.x},${p.y}`));
+      const mat = new THREE.MeshStandardMaterial({
+        color: wallPalette[componentIndex % wallPalette.length],
+        roughness: 0.86,
+      });
+      for (const cell of component) {
+        const cx = this._mapWorldX(cell.x);
+        const cz = this._mapWorldZ(cell.y);
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          if (cells.has(`${cell.x + dx},${cell.y + dy}`)) continue;
+          const geo = dx
+            ? new THREE.BoxGeometry(wallThickness, wallHeight, blockStep + wallThickness)
+            : new THREE.BoxGeometry(blockStep + wallThickness, wallHeight, wallThickness);
+          const wall = new THREE.Mesh(geo, mat);
+          wall.position.set(cx + dx * blockStep / 2, wallHeight / 2, cz + dy * blockStep / 2);
+          this.scene.add(wall);
+          this.mapWalls.push(wall);
         }
       }
-    }
+    });
 
     const goalGeo = new THREE.CircleGeometry(cellSize * 0.32, 24);
     const goalMat = new THREE.MeshBasicMaterial({ color: 0x35b88a });
@@ -545,48 +737,267 @@ export class Game {
     this.scene.add(goalMarker);
     this.mapGoalMarker = goalMarker;
 
-    this.shape.group.position.set(0, this.apothem, 0);
-    this.shape.group.quaternion.identity();
-    this.shape.phase = 'idle';
+    this.mapRacers = [];
+    for (let i = 0; i < this.racerCount; i++) {
+      let group, shadow, rolling;
+      if (i === 0) {
+        group = this.shape.group;
+        shadow = this.shapeShadow;
+        rolling = this.shape;
+      } else {
+        group = buildMesh(this.rhombi);
+        this._tintShape(group, RACER_COLORS[i % RACER_COLORS.length]);
+        this.scene.add(group);
+        shadow = this._makeBlobShadow(this.apothem * 1.15);
+        this.scene.add(shadow);
+        rolling = new RollingShape(this.rhombi, group);
+      }
+      const start = starts[i];
+      const pathColor = new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.78, 0.52);
+      const pathDots = new THREE.InstancedMesh(
+        new THREE.CircleGeometry(cellSize * 0.16, 14),
+        new THREE.MeshBasicMaterial({ color: pathColor, transparent: true, opacity: 0.96, depthWrite: false }),
+        blocksX * blocksY
+      );
+      const pathGlow = new THREE.InstancedMesh(
+        new THREE.CircleGeometry(cellSize * 0.27, 16),
+        new THREE.MeshBasicMaterial({ color: pathColor, transparent: true, opacity: 0.24, depthWrite: false }),
+        blocksX * blocksY
+      );
+      pathDots.count = 0;
+      pathGlow.count = 0;
+      pathDots.frustumCulled = false;
+      pathGlow.frustumCulled = false;
+      pathDots.renderOrder = 2;
+      pathGlow.renderOrder = 1;
+      this.scene.add(pathGlow);
+      this.scene.add(pathDots);
+      const racer = {
+        id: i,
+        shape: rolling,
+        shadow,
+        bx: start.fx,
+        by: start.fy,
+        path: null,
+        pathIndex: 0,
+        pendingDir: null,
+        pendingGapMs: 0,
+        blockedAttempts: 0,
+        previousCell: null,
+        avoidCell: null,
+        avoidSteps: 0,
+        steps: 0,
+        status: 'solving',
+        visitCounts: new Map([[`${start.fx},${start.fy}`, 1]]),
+        pathColor,
+        pathDots,
+        pathGlow,
+      };
+      rolling.onMoveComplete = () => { racer.pendingGapMs = this.moveGap; };
+      group.position.set(this._mapWorldX(racer.bx), this.apothem, this._mapWorldZ(racer.by));
+      group.quaternion.identity();
+      rolling.phase = 'idle';
+      shadow.position.set(group.position.x, 0.02, group.position.z);
+      this.mapRacers.push(racer);
+    }
+    this._camTarget.set(0, this.apothem, 0);
+    this.setSpeed(this.speedName || 'normal');
   }
 
   _teardownMapMode() {
     this.scene.remove(this.mapGround);
-    for (const w of this.mapWalls) this.scene.remove(w);
+    for (const wall of this.mapWalls) this.scene.remove(wall);
     this.mapWalls = [];
     this.scene.remove(this.mapGoalMarker);
-  }
-
-  _decideNextMoveMap() {
-    if (this.mapStatus !== 'solving') return;
-
-    if (!this.mapPath || this.mapPathIndex >= this.mapPath.length - 1) {
-      this.mapPath = findPath(
-        this.blockGrid.blockOpen,
-        this.blockGrid.blocksX,
-        { fx: this.bx, fy: this.by },
-        { fx: this.mapGoal.bx, fy: this.mapGoal.by }
-      );
-      this.mapPathIndex = 0;
-      if (!this.mapPath) {
-        this.mapStatus = 'stuck';
-        return;
+    for (const racer of (this.mapRacers || [])) {
+      this.scene.remove(racer.pathDots);
+      this.scene.remove(racer.pathGlow);
+      racer.pathDots?.geometry.dispose();
+      racer.pathDots?.material.dispose();
+      racer.pathGlow?.geometry.dispose();
+      racer.pathGlow?.material.dispose();
+      if (racer.id > 0) {
+        this.scene.remove(racer.shape.group);
+        this.scene.remove(racer.shadow);
       }
     }
+    this.mapRacers = [];
+  }
 
-    const next = this.mapPath[this.mapPathIndex + 1];
-    const dx = next.fx - this.bx;
-    const dy = next.fy - this.by;
+  _decideNextMoveMap(racer) {
+    if (racer.status !== 'solving') return;
+
+    const next = this.mapStrategy === 'explore'
+      ? this._chooseExplorationMove(racer)
+      : this._choosePathMove(racer);
+    if (!next) return;
+
+    const dx = next.fx - racer.bx;
+    const dy = next.fy - racer.by;
     const dir = dx === 1 ? RIGHT : dx === -1 ? LEFT : dy === 1 ? BACKWARD : FORWARD;
-    this.bx = next.fx;
-    this.by = next.fy;
-    this.mapPathIndex += 1;
-    this.mapSteps += 1;
-    this.shape.startMove(dir);
-    this.mapPendingDir = dir;
-    if (this.bx === this.mapGoal.bx && this.by === this.mapGoal.by) {
-      this.mapStatus = 'reached';
+    racer.previousCell = { bx: racer.bx, by: racer.by };
+    racer.bx = next.fx;
+    racer.by = next.fy;
+    racer.steps += 1;
+    racer.visitCounts.set(`${racer.bx},${racer.by}`, (racer.visitCounts.get(`${racer.bx},${racer.by}`) || 0) + 1);
+    racer.shape.startMove(dir);
+    racer.pendingDir = dir;
+    if (racer.bx === this.mapGoal.bx && racer.by === this.mapGoal.by) {
+      racer.status = 'reached';
+      this._updateMapPathDots(racer, null);
     }
+  }
+
+  _isMapGoal(x, y) {
+    return x === this.mapGoal.bx && y === this.mapGoal.by;
+  }
+
+  _mapCellAvailable(x, y, racer) {
+    if (!this.blockGrid.blockOpen(x, y)) return false;
+    if (this._isMapGoal(x, y)) return true;
+    return !this.mapRacers.some((other) =>
+      other !== racer &&
+      other.status !== 'reached' &&
+      Math.abs(other.bx - x) + Math.abs(other.by - y) <= 1
+    );
+  }
+
+  _choosePathMove(racer) {
+    // Global planning uses only the fixed obstacle map. Other racers are a
+    // local scheduling concern and must not distort or temporarily erase the
+    // true shortest path.
+    if (!racer.path || racer.pathIndex >= racer.path.length - 1) {
+      const staticOpen = (x, y) => this.blockGrid.blockOpen(x, y) &&
+        !(racer.avoidSteps > 0 && racer.avoidCell && x === racer.avoidCell.bx && y === racer.avoidCell.by);
+      racer.path = findPath(
+        staticOpen,
+        this.blockGrid.blocksX,
+        { fx: racer.bx, fy: racer.by },
+        { fx: this.mapGoal.bx, fy: this.mapGoal.by }
+      );
+      if (!racer.path && racer.avoidSteps > 0) {
+        racer.avoidSteps = 0;
+        racer.avoidCell = null;
+        racer.path = findPath(
+          this.blockGrid.blockOpen,
+          this.blockGrid.blocksX,
+          { fx: racer.bx, fy: racer.by },
+          { fx: this.mapGoal.bx, fy: this.mapGoal.by }
+        );
+      }
+      racer.pathIndex = 0;
+      this._updateMapPathDots(racer, racer.path);
+    }
+    if (!racer.path || racer.path.length < 2) return null;
+
+    const next = racer.path[racer.pathIndex + 1];
+    if (this._mapCellAvailable(next.fx, next.fy, racer)) {
+      racer.blockedAttempts = 0;
+      if (racer.avoidSteps > 0) {
+        racer.avoidSteps -= 1;
+        if (!racer.avoidSteps) racer.avoidCell = null;
+      }
+      racer.pathIndex += 1;
+      this._updateMapPathDots(racer, racer.path.slice(racer.pathIndex));
+      return next;
+    }
+
+    // Usually a moving blocker clears by itself, so wait without changing the
+    // planned line. Only a persistent mutual block triggers a one-cell local
+    // yield; A* then computes a fresh static shortest path from that new cell.
+    racer.blockedAttempts += 1;
+    if (racer.blockedAttempts < 30) return null;
+    return this._chooseLocalYieldMove(racer, next);
+  }
+
+  _chooseLocalYieldMove(racer, blockedNext) {
+    const blockers = this.mapRacers.filter((other) =>
+      other !== racer && other.status !== 'reached' &&
+      Math.abs(other.bx - blockedNext.fx) + Math.abs(other.by - blockedNext.fy) <= 1
+    );
+    const forceYield = racer.blockedAttempts >= 180;
+    if (!forceYield && blockers.some((other) => other.shape.isBusy())) return null;
+    const myRemaining = racer.path ? racer.path.length - racer.pathIndex : Infinity;
+    const shouldYield = blockers.some((other) => {
+      const otherRemaining = other.path ? other.path.length - other.pathIndex : Infinity;
+      return otherRemaining < myRemaining || (otherRemaining === myRemaining && other.id < racer.id);
+    });
+    if (!shouldYield && !forceYield) return null;
+
+    let candidates = Object.values(MAP_DIR_DELTAS)
+      .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
+      .filter((cell) =>
+        !(cell.fx === blockedNext.fx && cell.fy === blockedNext.fy) &&
+        this._mapCellAvailable(cell.fx, cell.fy, racer)
+      );
+    const fresh = candidates.filter((cell) =>
+      !racer.previousCell || cell.fx !== racer.previousCell.bx || cell.fy !== racer.previousCell.by
+    );
+    if (fresh.length) candidates = fresh;
+    if (!candidates.length) return null;
+
+    candidates.sort((a, b) => {
+      const clearance = (cell) => Math.min(...this.mapRacers
+        .filter((other) => other !== racer && other.status !== 'reached')
+        .map((other) => Math.abs(other.bx - cell.fx) + Math.abs(other.by - cell.fy)), 99);
+      const score = (cell) => clearance(cell) * 100 -
+        Math.abs(cell.fx - this.mapGoal.bx) - Math.abs(cell.fy - this.mapGoal.by);
+      return score(b) - score(a);
+    });
+    racer.blockedAttempts = 0;
+    racer.avoidCell = { bx: racer.bx, by: racer.by };
+    racer.avoidSteps = 3;
+    racer.path = null;
+    racer.pathIndex = 0;
+    this._updateMapPathDots(racer, null);
+    return candidates[0];
+  }
+
+  _updateMapPathDots(racer, path) {
+    if (!racer.pathDots) return;
+    if (this.mapStrategy !== 'path' || !path || path.length < 2) {
+      racer.pathDots.count = 0;
+      racer.pathGlow.count = 0;
+      racer.pathDots.instanceMatrix.needsUpdate = true;
+      racer.pathGlow.instanceMatrix.needsUpdate = true;
+      return;
+    }
+    const rotation = new THREE.Quaternion().setFromAxisAngle(PITCH_AXIS, -Math.PI / 2);
+    const scale = new THREE.Vector3(1, 1, 1);
+    const matrix = new THREE.Matrix4();
+    const remaining = path.slice(1);
+    remaining.forEach((cell, index) => {
+      matrix.compose(
+        new THREE.Vector3(this._mapWorldX(cell.fx), 0.055, this._mapWorldZ(cell.fy)),
+        rotation,
+        scale
+      );
+      racer.pathDots.setMatrixAt(index, matrix);
+      racer.pathGlow.setMatrixAt(index, matrix);
+    });
+    racer.pathDots.count = remaining.length;
+    racer.pathGlow.count = remaining.length;
+    racer.pathDots.instanceMatrix.needsUpdate = true;
+    racer.pathGlow.instanceMatrix.needsUpdate = true;
+  }
+
+  _chooseExplorationMove(racer) {
+    const candidates = Object.values(MAP_DIR_DELTAS)
+      .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
+      .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
+    if (!candidates.length) return null;
+
+    // Discovery comes first; visit count prevents short back-and-forth loops.
+    // Distance to the visible goal is only a tie-breaker, not a path search.
+    candidates.sort((a, b) => {
+      const visitsA = racer.visitCounts.get(`${a.fx},${a.fy}`) || 0;
+      const visitsB = racer.visitCounts.get(`${b.fx},${b.fy}`) || 0;
+      if (visitsA !== visitsB) return visitsA - visitsB;
+      const goalA = Math.abs(a.fx - this.mapGoal.bx) + Math.abs(a.fy - this.mapGoal.by);
+      const goalB = Math.abs(b.fx - this.mapGoal.bx) + Math.abs(b.fy - this.mapGoal.by);
+      return goalA - goalB || Math.random() - 0.5;
+    });
+    return candidates[0];
   }
 
   // ---------------------------------------------------------------------
@@ -605,11 +1016,13 @@ export class Game {
     // where "here" is, which is what made the view shudder.
     this._camTarget = new THREE.Vector3(0, this.apothem, 0);
     this._dragging = false;
+    this._dragMode = 'orbit';
     this._lastPointerX = 0;
     this._lastPointerY = 0;
 
     this._onPointerDown = (e) => {
       this._dragging = true;
+      this._dragMode = e.shiftKey ? 'pan' : 'orbit';
       this._lastPointerX = e.clientX;
       this._lastPointerY = e.clientY;
       this.canvas.setPointerCapture(e.pointerId);
@@ -620,6 +1033,16 @@ export class Game {
       const deltaY = e.clientY - this._lastPointerY;
       this._lastPointerX = e.clientX;
       this._lastPointerY = e.clientY;
+      if (deltaX || deltaY) this._cameraManualUntil = performance.now() + CAMERA_RETURN_DELAY_MS;
+      if (this._dragMode === 'pan') {
+        const scale = this.cameraOrbit.radius * 0.0024;
+        const theta = this.cameraOrbit.theta;
+        const right = new THREE.Vector3(Math.cos(theta), 0, -Math.sin(theta));
+        const forward = new THREE.Vector3(-Math.sin(theta), 0, -Math.cos(theta));
+        this._camTarget.addScaledVector(right, -deltaX * scale);
+        this._camTarget.addScaledVector(forward, deltaY * scale);
+        return;
+      }
       this.cameraOrbit.theta -= deltaX * ORBIT_SPEED;
       this.cameraOrbit.elevation = Math.min(
         CAMERA_ELEVATION_MAX,
@@ -634,6 +1057,7 @@ export class Game {
     };
     this._onWheel = (e) => {
       e.preventDefault();
+      this._cameraManualUntil = performance.now() + CAMERA_RETURN_DELAY_MS;
       // Multiplicative zoom keeps each notch feeling the same size whether
       // you're zoomed in close or all the way out across the wide range.
       const factor = Math.exp(e.deltaY * ZOOM_LOG_SPEED);
@@ -667,63 +1091,6 @@ export class Game {
       return;
     }
 
-    const key = e.key;
-    let kind = null;
-    if (key === 'ArrowUp' || key === 'w' || key === 'W') kind = 'forward';
-    else if (key === 'ArrowDown' || key === 's' || key === 'S') kind = 'back';
-    else if (key === 'ArrowLeft' || key === 'a' || key === 'A') kind = 'left';
-    else if (key === 'ArrowRight' || key === 'd' || key === 'D') kind = 'right';
-    if (!kind) return;
-
-    if (this.gameType === 'track') {
-      if (kind === 'back') return; // the track only ever runs one way
-      if (kind === 'left' && this.laneIndex <= -1) return;
-      if (kind === 'right' && this.laneIndex >= 1) return;
-      if (kind === 'forward' && this._isTrackBlocked(this.rowIndex + 1, this.laneIndex)) return;
-      if (kind === 'left' && this._isTrackBlocked(this.rowIndex, this.laneIndex - 1)) return;
-      if (kind === 'right' && this._isTrackBlocked(this.rowIndex, this.laneIndex + 1)) return;
-    } else {
-      const { dx, dy } = MAP_DIR_DELTAS[kind];
-      if (!this.blockGrid.blockOpen(this.bx + dx, this.by + dy)) return;
-    }
-
-    e.preventDefault();
-    this.manualDir = kind;
-  }
-
-  _applyManualMove(kind) {
-    if (this.gameType === 'track') {
-      if (kind === 'forward') {
-        this.rowIndex += 1;
-        this.distance += 1;
-        this.shape.startMove(FORWARD);
-        this._ensureObstaclesGenerated(this.rowIndex + GEN_BATCH);
-      } else if (kind === 'left') {
-        this.laneIndex -= 1;
-        this.shape.startMove(LEFT);
-      } else if (kind === 'right') {
-        this.laneIndex += 1;
-        this.shape.startMove(RIGHT);
-      }
-      return;
-    }
-
-    const { dx, dy, vec } = MAP_DIR_DELTAS[kind];
-    this.bx += dx;
-    this.by += dy;
-    this.mapSteps += 1;
-    this.shape.startMove(vec);
-    this.mapPendingDir = vec;
-    // The cached A* path no longer starts where the shape actually is.
-    this.mapPath = null;
-    if (this.bx === this.mapGoal.bx && this.by === this.mapGoal.by) {
-      this.mapStatus = 'reached';
-    }
-  }
-
-  _decideNextMove() {
-    if (this.gameType === 'track') this._decideNextMoveTrack();
-    else this._decideNextMoveMap();
   }
 
   _updateCamera(dt) {
@@ -739,9 +1106,16 @@ export class Game {
     // stop-start tumble position every frame - is what actually stops the
     // view from shuddering: position and look-at now always agree on
     // where "here" is.
-    const tau = this._dragging ? CAMERA_DRAG_TAU_MS : CAMERA_FOLLOW_TAU_MS;
-    const alpha = 1 - Math.exp(-dt / tau);
-    this._camTarget.lerp(new THREE.Vector3(p.x, anchorY, p.z), alpha);
+    if (this.gameType === 'track' && performance.now() >= this._cameraManualUntil) {
+      const leader = this.trackRacers.reduce(
+        (best, racer) => racer.row > best.row ? racer : best,
+        this.trackRacers[0]
+      );
+      const leaderPos = leader.shape.group.position;
+      const lookAheadZ = leaderPos.z - CAMERA_LOOK_AHEAD_ROWS * this.forwardStep;
+      const alpha = 1 - Math.exp(-dt / CAMERA_FOLLOW_TAU_MS);
+      this._camTarget.lerp(new THREE.Vector3(0, anchorY, lookAheadZ), alpha);
+    }
 
     // The orbit offset itself (theta/elevation/radius) is applied exactly,
     // not lerped - it's already-smoothed motion (from _camTarget) plus an
@@ -773,8 +1147,7 @@ export class Game {
     this.sun.target.position.set(p.x, anchorY, p.z);
     this.sun.target.updateMatrixWorld();
 
-    this.shapeShadow.position.set(p.x, 0.02, p.z);
-    if (this.gameType === 'track') this.ground.position.z = p.z - 1900 + 40;
+    if (this.gameType === 'map') this.shapeShadow.position.set(p.x, 0.02, p.z);
   }
 
   _onResize() {
@@ -796,27 +1169,34 @@ export class Game {
     this._lastT = now;
 
     if (this.running) {
-      if (!this.shape.isBusy()) {
-        if (this.mapPendingDir) {
-          // Second half of a one-block crossing (see _setupMapMode) -
-          // chains immediately, with no gap, so the two tumbles read as one
-          // continuous motion across the block rather than a mid-corridor
-          // pause.
-          const dir = this.mapPendingDir;
-          this.mapPendingDir = null;
-          this.shape.startMove(dir);
-        } else if (this.manualDir) {
-          this._applyManualMove(this.manualDir);
-          this.manualDir = null;
-        } else if (this.mode === 'auto') {
-          if (this.pendingGapMs > 0) {
-            this.pendingGapMs -= dt;
-          } else {
-            this._decideNextMove();
+      if (this.gameType === 'track') {
+        for (const racer of this.trackRacers) {
+          if (!racer.shape.isBusy() && !racer.finished) {
+            if (racer.pendingGapMs > 0) racer.pendingGapMs -= dt;
+            else this._decideNextMoveTrack(racer);
           }
+          racer.shape.update(dt);
+          const p = racer.shape.group.position;
+          racer.shadow.position.set(p.x, 0.02, p.z);
+        }
+      } else {
+        for (const racer of this.mapRacers) {
+          if (!racer.shape.isBusy()) {
+            if (racer.pendingDir) {
+              const dir = racer.pendingDir;
+              racer.pendingDir = null;
+              racer.shape.startMove(dir);
+            } else if (racer.pendingGapMs > 0) {
+              racer.pendingGapMs -= dt;
+            } else {
+              this._decideNextMoveMap(racer);
+            }
+          }
+          racer.shape.update(dt);
+          const p = racer.shape.group.position;
+          racer.shadow.position.set(p.x, 0.02, p.z);
         }
       }
-      this.shape.update(dt);
       this._reportStats();
     }
 

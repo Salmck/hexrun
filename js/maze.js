@@ -135,3 +135,73 @@ export function bfsFarthest(isOpen, gridW, start) {
   }
   return { point: farthest, dist: maxDist };
 }
+
+// Builds a large obstacle field with loops and alternate routes rather than
+// a perfect maze. Random wall segments create structure, then only the
+// largest connected open component is kept so every selected start can reach
+// the shared goal.
+export function generateObstacleGrid(width, height, rng = Math.random, obstacleProbability = 0.32) {
+  const key = (x, y) => y * width + x;
+  for (let attempt = 0; attempt < 300; attempt++) {
+    // Phase 1: the map-sized 2D array. true = open, false = obstacle point.
+    const grid = Array.from({ length: height }, (_, y) =>
+      Array.from({ length: width }, (_, x) => {
+        if (x === 0 || y === 0 || x === width - 1 || y === height - 1) return true;
+        return rng() >= obstacleProbability;
+      })
+    );
+
+    const openCells = [];
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      if (grid[y][x]) openCells.push({ fx: x, fy: y });
+    }
+    if (!openCells.length) continue;
+
+    // Require every open point to belong to one connected walkable region.
+    const openSeen = new Set([key(openCells[0].fx, openCells[0].fy)]);
+    const openQueue = [{ x: openCells[0].fx, y: openCells[0].fy }];
+    for (let head = 0; head < openQueue.length; head++) {
+      const cur = openQueue[head];
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cur.x + dx, ny = cur.y + dy;
+        const nk = key(nx, ny);
+        if (nx < 0 || ny < 0 || nx >= width || ny >= height || !grid[ny][nx] || openSeen.has(nk)) continue;
+        openSeen.add(nk);
+        openQueue.push({ x: nx, y: ny });
+      }
+    }
+    if (openSeen.size !== openCells.length) continue;
+
+    // Phase 2: group four-directionally adjacent obstacle points. Each group
+    // becomes one orthogonal wall-enclosed island in the 3D/2D map.
+    const obstacleSeen = new Set();
+    const obstacleComponents = [];
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const startKey = key(x, y);
+        if (grid[y][x] || obstacleSeen.has(startKey)) continue;
+        const component = [];
+        const queue = [{ x, y }];
+        obstacleSeen.add(startKey);
+        for (let head = 0; head < queue.length; head++) {
+          const cur = queue[head];
+          component.push(cur);
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            const nx = cur.x + dx, ny = cur.y + dy;
+            const nk = key(nx, ny);
+            if (nx <= 0 || ny <= 0 || nx >= width - 1 || ny >= height - 1 || grid[ny][nx] || obstacleSeen.has(nk)) continue;
+            obstacleSeen.add(nk);
+            queue.push({ x: nx, y: ny });
+          }
+        }
+        obstacleComponents.push(component);
+      }
+    }
+    const blockedCount = width * height - openCells.length;
+    if (obstacleComponents.length < 14 || blockedCount < width * height * 0.16) continue;
+
+    const blockOpen = (x, y) => x >= 0 && y >= 0 && x < width && y < height && grid[y][x];
+    return { blocksX: width, blocksY: height, grid, blockOpen, openCells, obstacleComponents };
+  }
+  throw new Error('Unable to generate a connected probability obstacle map');
+}

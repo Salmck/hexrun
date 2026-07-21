@@ -120,15 +120,12 @@ html, body {
   background: #b3c2a8 !important;
 }
 
-#btn-mode {
-  background: #ead9c9 !important;
-}
-
 #btn-reset {
   background: #b9c4d6 !important;
 }
 
-#speed-label {
+#speed-label,
+#racer-label {
   font-size: 12px;
   color: #d8d2c8;
   display: flex;
@@ -137,13 +134,19 @@ html, body {
   padding-left: 4px;
 }
 
-#speed-label select {
+#speed-label select,
+#racer-label input {
   background: rgba(0, 0, 0, 0.3);
   color: #ece6df;
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 6px;
   padding: 3px 6px;
   font-size: 12px;
+}
+
+#racer-label input {
+  width: 48px;
+  text-align: center;
 }
 
 @media (max-width: 640px) {

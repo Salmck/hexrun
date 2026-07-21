@@ -29,8 +29,12 @@
     <div id="controls">
       <button id="btn-toggle" type="button">暂停</button>
       <button id="btn-gametype" type="button">赛道模式</button>
-      <button id="btn-mode" type="button">模式：自动</button>
+      <button id="btn-map-strategy" type="button" hidden>A* 寻路</button>
       <button id="btn-reset" type="button">重置</button>
+      <label id="racer-label">
+        参赛物体
+        <input id="racer-count" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" />
+      </label>
       <label id="speed-label">
         速度
         <select id="speed">
@@ -42,6 +46,6 @@
     </div>
   </div>
 
-  <script type="module" src="js/main.js"></script>
+  <script type="module" src="js/main.js?v=37"></script>
 </body>
 </html>
