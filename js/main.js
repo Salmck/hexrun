@@ -43,9 +43,10 @@ gametypeBtn.addEventListener('click', () => {
   racerCountSelect.value = String(game.racerCount);
 });
 
+const MAP_STRATEGY_LABEL = { path: 'A* 寻路', explore: '自主探索', agent: '智能体模式' };
 mapStrategyBtn.addEventListener('click', () => {
   const strategy = game.toggleMapStrategy();
-  mapStrategyBtn.textContent = strategy === 'path' ? 'A* 寻路' : '自主探索';
+  mapStrategyBtn.textContent = MAP_STRATEGY_LABEL[strategy];
 });
 
 resetBtn.addEventListener('click', () => {

@@ -126,8 +126,11 @@ export class Game {
   }
 
   toggleMapStrategy() {
-    this.mapStrategy = this.mapStrategy === 'path' ? 'explore' : 'path';
+    const order = ['path', 'explore', 'agent'];
+    this.mapStrategy = order[(order.indexOf(this.mapStrategy) + 1) % order.length];
     if (this.gameType === 'map') {
+      this.agentGoalKnown = false;
+      this.agentTrail = null;
       for (const racer of this.mapRacers) {
         racer.path = null;
         racer.pathIndex = 0;
@@ -135,6 +138,7 @@ export class Game {
         racer.avoidCell = null;
         racer.avoidSteps = 0;
         racer.visitCounts = new Map([[`${racer.bx},${racer.by}`, 1]]);
+        racer.trail = [{ fx: racer.bx, fy: racer.by }];
         this._updateMapPathDots(racer, null);
       }
     }
@@ -655,6 +659,8 @@ export class Game {
       this.cameraOrbit.radius = 190;
     }
     this.blockGrid = generateObstacleGrid(MAP_SIZE, MAP_SIZE, Math.random);
+    this.agentGoalKnown = false;
+    this.agentTrail = null;
     const { blockOpen, blocksX, blocksY, openCells, obstacleComponents } = this.blockGrid;
     const center = { fx: (blocksX - 1) / 2, fy: (blocksY - 1) / 2 };
     const goalCell = [...openCells].sort((a, b) =>
@@ -789,6 +795,7 @@ export class Game {
         steps: 0,
         status: 'solving',
         visitCounts: new Map([[`${start.fx},${start.fy}`, 1]]),
+        trail: [{ fx: start.fx, fy: start.fy }],
         pathColor,
         pathDots,
         pathGlow,
@@ -827,9 +834,14 @@ export class Game {
   _decideNextMoveMap(racer) {
     if (racer.status !== 'solving') return;
 
-    const next = this.mapStrategy === 'explore'
-      ? this._chooseExplorationMove(racer)
-      : this._choosePathMove(racer);
+    let next;
+    if (this.mapStrategy === 'explore') {
+      next = this._chooseExplorationMove(racer);
+    } else if (this.mapStrategy === 'agent') {
+      next = this.agentGoalKnown ? this._chooseDiscoveredPathMove(racer) : this._chooseAgentExploreMove(racer);
+    } else {
+      next = this._choosePathMove(racer);
+    }
     if (!next) return;
 
     const dx = next.fx - racer.bx;
@@ -840,11 +852,19 @@ export class Game {
     racer.by = next.fy;
     racer.steps += 1;
     racer.visitCounts.set(`${racer.bx},${racer.by}`, (racer.visitCounts.get(`${racer.bx},${racer.by}`) || 0) + 1);
+    if (this.mapStrategy === 'agent') racer.trail.push({ fx: racer.bx, fy: racer.by });
     racer.shape.startMove(dir);
     racer.pendingDir = dir;
     if (racer.bx === this.mapGoal.bx && racer.by === this.mapGoal.by) {
       racer.status = 'reached';
       this._updateMapPathDots(racer, null);
+      if (this.mapStrategy === 'agent' && !this.agentGoalKnown) {
+        // This racer is the first to stumble onto the goal by blind
+        // exploration - its exact traveled route becomes the shared
+        // knowledge every other still-searching racer latches onto.
+        this.agentGoalKnown = true;
+        this.agentTrail = racer.trail.slice();
+      }
     }
   }
 
@@ -998,6 +1018,77 @@ export class Game {
       return goalA - goalB || Math.random() - 0.5;
     });
     return candidates[0];
+  }
+
+  // "Agent" strategy, phase 1: nobody has found the goal yet. Unlike
+  // _chooseExplorationMove this never reads this.mapGoal - a searching racer
+  // has no sense of which way the goal is, so the only signal is its own
+  // visit-count memory, with ties broken purely at random.
+  _chooseAgentExploreMove(racer) {
+    const candidates = Object.values(MAP_DIR_DELTAS)
+      .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
+      .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
+    if (!candidates.length) return null;
+
+    candidates.sort((a, b) => {
+      const visitsA = racer.visitCounts.get(`${a.fx},${a.fy}`) || 0;
+      const visitsB = racer.visitCounts.get(`${b.fx},${b.fy}`) || 0;
+      if (visitsA !== visitsB) return visitsA - visitsB;
+      return Math.random() - 0.5;
+    });
+    return candidates[0];
+  }
+
+  // "Agent" strategy, phase 2: someone else already reached the goal, so its
+  // exact traveled route (this.agentTrail) is now shared knowledge. Rather
+  // than solving its own fresh shortest path to the goal, a racer in this
+  // phase heads for the nearest cell on that known trail and rides it the
+  // rest of the way in - it moves by reference to another racer's discovery,
+  // not by independently re-deriving the optimal route.
+  _buildTrailFollowPath(racer) {
+    const trail = this.agentTrail;
+    if (!trail || !trail.length) return null;
+
+    let joinIndex = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < trail.length; i++) {
+      const d = Math.abs(trail[i].fx - racer.bx) + Math.abs(trail[i].fy - racer.by);
+      if (d < bestDist) { bestDist = d; joinIndex = i; }
+    }
+    const joinCell = trail[joinIndex];
+
+    let approach;
+    if (racer.bx === joinCell.fx && racer.by === joinCell.fy) {
+      approach = [{ fx: racer.bx, fy: racer.by }];
+    } else {
+      const staticOpen = (x, y) => this.blockGrid.blockOpen(x, y) &&
+        !(racer.avoidSteps > 0 && racer.avoidCell && x === racer.avoidCell.bx && y === racer.avoidCell.by);
+      approach = findPath(staticOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: joinCell.fx, fy: joinCell.fy })
+        || findPath(this.blockGrid.blockOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: joinCell.fx, fy: joinCell.fy });
+      if (!approach) return null;
+    }
+    return approach.concat(trail.slice(joinIndex + 1));
+  }
+
+  _chooseDiscoveredPathMove(racer) {
+    if (!racer.path || racer.pathIndex >= racer.path.length - 1) {
+      racer.path = this._buildTrailFollowPath(racer);
+      racer.pathIndex = 0;
+      this._updateMapPathDots(racer, racer.path);
+    }
+    if (!racer.path || racer.path.length < 2) return null;
+
+    const next = racer.path[racer.pathIndex + 1];
+    if (this._mapCellAvailable(next.fx, next.fy, racer)) {
+      racer.blockedAttempts = 0;
+      racer.pathIndex += 1;
+      this._updateMapPathDots(racer, racer.path.slice(racer.pathIndex));
+      return next;
+    }
+
+    racer.blockedAttempts += 1;
+    if (racer.blockedAttempts < 30) return null;
+    return this._chooseLocalYieldMove(racer, next);
   }
 
   // ---------------------------------------------------------------------

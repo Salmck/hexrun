@@ -165,9 +165,27 @@ export class Renderer2D {
       ctx.strokeRect(x, y, w, d);
     }
 
+    // Agent mode: once someone has found the goal, its exact traveled route
+    // is shared knowledge - draw it as a fixed gold trail underneath the
+    // per-racer dots, distinguishing "the known route" from "my plan to
+    // reach it". Before discovery there's nothing to draw.
+    if (g.mapStrategy === 'agent' && g.agentGoalKnown && g.agentTrail) {
+      const r = Math.max(2, g.forwardStep * scale * 0.09);
+      ctx.fillStyle = 'rgba(255, 196, 64, 0.65)';
+      for (const cell of g.agentTrail) {
+        const x = toX(g._mapWorldX(cell.fx));
+        const y = toY(g._mapWorldZ(cell.fy));
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
     // A* planned routes: one dotted colour per racer. Exploration mode has
-    // no precomputed route, so it intentionally draws no dots.
-    if (g.mapStrategy === 'path') {
+    // no precomputed route, so it intentionally draws no dots. Agent mode
+    // reuses the same per-racer dots once a racer has grafted a route onto
+    // the discovered trail (see above).
+    if (g.mapStrategy === 'path' || g.mapStrategy === 'agent') {
       for (const racer of g.mapRacers) {
         if (!racer.path || racer.status === 'reached') continue;
         const color = '#' + racer.pathColor.getHexString();
