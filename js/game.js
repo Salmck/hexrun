@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
-import { Renderer2D } from './renderer2d.js?v=30';
+import { Renderer2D } from './renderer2d.js?v=31';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -975,7 +975,7 @@ export class Game {
 
   _updateMapPathDots(racer, path) {
     if (!racer.pathDots) return;
-    if (this.mapStrategy !== 'path' || !path || path.length < 2) {
+    if ((this.mapStrategy !== 'path' && this.mapStrategy !== 'agent') || !path || path.length < 2) {
       racer.pathDots.count = 0;
       racer.pathGlow.count = 0;
       racer.pathDots.instanceMatrix.needsUpdate = true;
