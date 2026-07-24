@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=42';
+import { Game } from './game.js?v=43';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');

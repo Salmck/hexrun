@@ -1023,12 +1023,17 @@ export class Game {
     if (fresh.length) candidates = fresh;
     if (!candidates.length) return null;
 
+    // Agent2 racers have no assignedGoal (it's null until a goal is claimed
+    // mid-run) - fall back to whichever known goal reference this racer
+    // actually has, or drop the goal-ward term entirely while still blindly
+    // exploring.
+    const goalRef = racer.assignedGoal || racer.claimedGoal || null;
     candidates.sort((a, b) => {
       const clearance = (cell) => Math.min(...this.mapRacers
         .filter((other) => other !== racer && other.status !== 'reached')
         .map((other) => Math.abs(other.bx - cell.fx) + Math.abs(other.by - cell.fy)), 99);
       const score = (cell) => clearance(cell) * 100 -
-        Math.abs(cell.fx - racer.assignedGoal.bx) - Math.abs(cell.fy - racer.assignedGoal.by);
+        (goalRef ? Math.abs(cell.fx - goalRef.bx) + Math.abs(cell.fy - goalRef.by) : 0);
       return score(b) - score(a);
     });
     racer.blockedAttempts = 0;
@@ -1270,28 +1275,114 @@ export class Game {
     return (x, y) => alive.has(`${x},${y}`);
   }
 
-  // Blind wandering: only the racer's own immediate, just-sensed neighbours
-  // are candidates (never anything from the true map), preferring whichever
-  // is least-visited across the whole shared swarm (not just this racer's
-  // own history) and steering away from pockets the shared knowledge has
-  // already proven are dead ends, so nobody re-walks a known-empty branch.
-  _chooseAgent2ExploreMove(racer) {
+  // A frontier is a known, non-dead-end cell that still borders at least one
+  // never-sensed neighbour - stepping onto it is guaranteed to reveal new
+  // territory. Restricting candidates to "alive" (non-pruned) cells means a
+  // branch that's fully sensed and a dead end simply stops producing
+  // frontiers, so nobody is ever routed down it again.
+  _agent2Frontiers(alive) {
+    const frontiers = [];
+    for (const key of this.agent2KnownOpen) {
+      const [x, y] = key.split(',').map(Number);
+      if (!alive(x, y)) continue;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nk = `${x + dx},${y + dy}`;
+        if (!this.agent2KnownOpen.has(nk) && !this.agent2KnownWall.has(nk)) {
+          frontiers.push({ fx: x, fy: y });
+          break;
+        }
+      }
+    }
+    return frontiers;
+  }
+
+  // Picks which frontier to head for next. With no goal found yet this is
+  // plain nearest-frontier exploration (spread across the swarm by shared
+  // visit count so racers fan out instead of piling onto the same edge).
+  // Once ANY goal has been discovered, goals are known to cluster, so every
+  // racer still hunting for one is pulled toward that neighbourhood first -
+  // not because it "knows" a goal is there, but because the one goal
+  // everyone's already seen is the best evidence yet of where the rest of
+  // the cluster is.
+  _chooseAgent2ExploreTarget(racer, frontiers) {
+    const hasGoalHint = this.agent2Discovered.length > 0;
+    const scored = frontiers.map((f) => {
+      const distToMe = Math.abs(f.fx - racer.bx) + Math.abs(f.fy - racer.by);
+      const distToGoal = hasGoalHint
+        ? Math.min(...this.agent2Discovered.map((g) => Math.abs(f.fx - g.bx) + Math.abs(f.fy - g.by)))
+        : 0;
+      const visits = this.agent2SharedVisits.get(`${f.fx},${f.fy}`) || 0;
+      return { f, distToMe, distToGoal, visits };
+    });
+    scored.sort((a, b) => {
+      if (hasGoalHint && a.distToGoal !== b.distToGoal) return a.distToGoal - b.distToGoal;
+      if (a.distToMe !== b.distToMe) return a.distToMe - b.distToMe;
+      if (a.visits !== b.visits) return a.visits - b.visits;
+      return Math.random() - 0.5;
+    });
+    return scored.length ? scored[0].f : null;
+  }
+
+  // Full A* route over the known-and-alive map to the chosen frontier - a
+  // racer commits to this whole route instead of re-deciding one step at a
+  // time, which is what caused the aimless back-and-forth: a step-by-step
+  // greedy walk has no memory of "which way I was already headed."
+  _buildAgent2ExplorePath(racer) {
+    const alive = this._agent2ComputeKnownPruned();
+    const frontiers = this._agent2Frontiers(alive);
+    if (!frontiers.length) return null;
+    const target = this._chooseAgent2ExploreTarget(racer, frontiers);
+    if (!target) return null;
+    if (racer.bx === target.fx && racer.by === target.fy) return [{ fx: racer.bx, fy: racer.by }];
+    return findPath(alive, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, target);
+  }
+
+  // Rarely needed fallback for when no committed route exists yet (e.g. the
+  // very first tick, or the known map has momentarily no reachable
+  // frontier) - a single least-visited step so the racer isn't stuck idle.
+  _chooseAgent2FallbackMove(racer) {
     const candidates = Object.values(MAP_DIR_DELTAS)
       .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
       .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
     if (!candidates.length) return null;
 
-    const knownPruned = this._agent2ComputeKnownPruned();
-    const fresh = candidates.filter((cell) => knownPruned(cell.fx, cell.fy));
-    const pool = fresh.length ? fresh : candidates;
-
-    pool.sort((a, b) => {
+    candidates.sort((a, b) => {
       const visitsA = this.agent2SharedVisits.get(`${a.fx},${a.fy}`) || 0;
       const visitsB = this.agent2SharedVisits.get(`${b.fx},${b.fy}`) || 0;
       if (visitsA !== visitsB) return visitsA - visitsB;
       return Math.random() - 0.5;
     });
-    return pool[0];
+    return candidates[0];
+  }
+
+  _chooseAgent2ExploreMove(racer) {
+    const targetStillFrontier = () => {
+      if (!racer.path || !racer.path.length) return false;
+      const dest = racer.path[racer.path.length - 1];
+      return [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => {
+        const nk = `${dest.fx + dx},${dest.fy + dy}`;
+        return !this.agent2KnownOpen.has(nk) && !this.agent2KnownWall.has(nk);
+      });
+    };
+
+    if (!racer.path || racer.pathIndex >= racer.path.length - 1 || !targetStillFrontier()) {
+      racer.path = this._buildAgent2ExplorePath(racer);
+      racer.pathIndex = 0;
+      this._updateMapPathDots(racer, racer.path);
+    }
+    if (!racer.path || racer.path.length < 2) return this._chooseAgent2FallbackMove(racer);
+
+    const next = racer.path[racer.pathIndex + 1];
+    if (this._mapCellAvailable(next.fx, next.fy, racer)) {
+      racer.blockedAttempts = 0;
+      racer.pathIndex += 1;
+      this._updateMapPathDots(racer, racer.path.slice(racer.pathIndex));
+      return next;
+    }
+
+    racer.blockedAttempts += 1;
+    if (racer.blockedAttempts < 30) return null;
+    return this._chooseLocalYieldMove(racer, next);
   }
 
   // Once claimed, a racer heads for the nearest cell on ITS claimed goal's
