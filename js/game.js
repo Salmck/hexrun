@@ -1368,7 +1368,12 @@ export class Game {
     if (!racer.path || racer.pathIndex >= racer.path.length - 1 || !targetStillFrontier()) {
       racer.path = this._buildAgent2ExplorePath(racer);
       racer.pathIndex = 0;
-      this._updateMapPathDots(racer, racer.path);
+      // Unlike the trail-to-goal path, this route only leads to an
+      // unexplored frontier, not the real goal - drawing it as a dotted
+      // line would look exactly like "found the way to the goal" (A*-style)
+      // when the racer still has no idea where the goal is, so it's
+      // deliberately left invisible.
+      this._updateMapPathDots(racer, null);
     }
     if (!racer.path || racer.path.length < 2) return this._chooseAgent2FallbackMove(racer);
 
@@ -1376,7 +1381,6 @@ export class Game {
     if (this._mapCellAvailable(next.fx, next.fy, racer)) {
       racer.blockedAttempts = 0;
       racer.pathIndex += 1;
-      this._updateMapPathDots(racer, racer.path.slice(racer.pathIndex));
       return next;
     }
 
