@@ -1159,24 +1159,50 @@ export class Game {
     return this._chooseLocalYieldMove(racer, next);
   }
 
-  // "Agent" strategy 2's N goals just need to be spread out across the map -
-  // full connectivity of every open cell is already guaranteed by
-  // generateObstacleGrid, so any goal is reachable from anywhere without
-  // any special adjacency requirement between goals.
+  // "Agent" strategy 2: N goals clustered together (adjacent via 4-connectivity).
+  // Start with one goal, then each subsequent goal must be 4-adjacent to at least
+  // one already-placed goal, forming a contiguous cluster (挨在一起).
   _pickScatteredGoals(openCells, count) {
     const goals = [];
-    for (let i = 0; i < count; i++) {
-      let best = null;
-      let bestScore = -Infinity;
-      for (const cell of openCells) {
-        if (goals.some((g) => g.fx === cell.fx && g.fy === cell.fy)) continue;
-        const score = goals.length
-          ? Math.min(...goals.map((g) => Math.abs(cell.fx - g.fx) + Math.abs(cell.fy - g.fy)))
-          : Math.random();
-        if (score > bestScore) { bestScore = score; best = cell; }
+    const goalSet = new Set();
+    const openSet = new Set(openCells.map(c => `${c.fx},${c.fy}`));
+
+    // Pick first goal randomly
+    if (openCells.length === 0) return goals;
+    const first = openCells[Math.floor(Math.random() * openCells.length)];
+    goals.push(first);
+    goalSet.add(`${first.fx},${first.fy}`);
+
+    // For each additional goal, pick from neighbors of existing cluster
+    for (let i = 1; i < count; i++) {
+      const candidates = new Set();
+      // Collect all 4-adjacent cells to any goal in the cluster
+      for (const goal of goals) {
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const key = `${goal.fx + dx},${goal.fy + dy}`;
+          if (openSet.has(key) && !goalSet.has(key)) {
+            candidates.add(key);
+          }
+        }
       }
-      if (best) goals.push(best);
+
+      if (candidates.size === 0) {
+        // If no adjacent cells available, fall back to random from remaining open
+        for (const key of openSet) {
+          if (!goalSet.has(key)) candidates.add(key);
+        }
+      }
+
+      if (candidates.size === 0) break;
+
+      // Pick one randomly from candidates
+      const chosen = Array.from(candidates)[Math.floor(Math.random() * candidates.size)];
+      const [fx, fy] = chosen.split(',').map(Number);
+      const cell = { fx, fy };
+      goals.push(cell);
+      goalSet.add(chosen);
     }
+
     return goals;
   }
 
