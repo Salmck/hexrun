@@ -870,18 +870,64 @@ export class Game {
     this.mapRacers = [];
   }
 
+  // If this racer is sitting on the exact cell some other still-solving
+  // racer needs for one of its last couple of steps to its real goal, step
+  // aside immediately instead of making the near-finish racer wait or
+  // detour around - losing a beat off its own plan is cheaper than
+  // stalling someone who's about to actually arrive. A racer that's merely
+  // exploring (agent2, no claimedGoal yet) never counts as "near its goal"
+  // here, since its committed route only leads to an unexplored frontier,
+  // not a real terminal - and it likewise never asks a neighbour to yield
+  // for that non-goal.
+  _chooseCourtesyYieldMove(racer) {
+    const nearOwnGoal = (r) => {
+      if (!r.path || r.pathIndex >= r.path.length - 1) return false;
+      if (this.mapStrategy === 'agent2' && !r.claimedGoal) return false;
+      return (r.path.length - 1 - r.pathIndex) <= 2;
+    };
+
+    if (nearOwnGoal(racer)) return null;
+
+    const waitingNeighbor = this.mapRacers.find((other) =>
+      other !== racer && other.status === 'solving' && nearOwnGoal(other) &&
+      other.path[other.pathIndex + 1].fx === racer.bx &&
+      other.path[other.pathIndex + 1].fy === racer.by
+    );
+    if (!waitingNeighbor) return null;
+
+    const candidates = Object.values(MAP_DIR_DELTAS)
+      .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
+      .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
+    if (!candidates.length) return null;
+
+    candidates.sort((a, b) => {
+      const clearance = (cell) => Math.min(...this.mapRacers
+        .filter((other) => other !== racer && other.status !== 'reached')
+        .map((other) => Math.abs(other.bx - cell.fx) + Math.abs(other.by - cell.fy)), 99);
+      return clearance(b) - clearance(a);
+    });
+
+    racer.path = null;
+    racer.pathIndex = 0;
+    racer.blockedAttempts = 0;
+    this._updateMapPathDots(racer, null);
+    return candidates[0];
+  }
+
   _decideNextMoveMap(racer) {
     if (racer.status !== 'solving') return;
 
-    let next;
-    if (this.mapStrategy === 'explore') {
-      next = this._chooseExplorationMove(racer);
-    } else if (this.mapStrategy === 'agent') {
-      next = this.agentGoalKnown ? this._chooseDiscoveredPathMove(racer) : this._chooseAgentExploreMove(racer);
-    } else if (this.mapStrategy === 'agent2') {
-      next = this._chooseAgent2Move(racer);
-    } else {
-      next = this._choosePathMove(racer);
+    let next = this._chooseCourtesyYieldMove(racer);
+    if (!next) {
+      if (this.mapStrategy === 'explore') {
+        next = this._chooseExplorationMove(racer);
+      } else if (this.mapStrategy === 'agent') {
+        next = this.agentGoalKnown ? this._chooseDiscoveredPathMove(racer) : this._chooseAgentExploreMove(racer);
+      } else if (this.mapStrategy === 'agent2') {
+        next = this._chooseAgent2Move(racer);
+      } else {
+        next = this._choosePathMove(racer);
+      }
     }
     if (!next) return;
 
@@ -942,10 +988,13 @@ export class Game {
   _mapCellAvailable(x, y, racer) {
     if (!this.blockGrid.blockOpen(x, y)) return false;
     if (this._isMapGoal(x, y)) return true;
+    // Only an exact-same-cell occupancy counts as a collision - racers may
+    // freely stand right next to each other, they just can't both be on the
+    // same square at once.
     return !this.mapRacers.some((other) =>
       other !== racer &&
       other.status !== 'reached' &&
-      Math.abs(other.bx - x) + Math.abs(other.by - y) <= 1
+      other.bx === x && other.by === y
     );
   }
 
