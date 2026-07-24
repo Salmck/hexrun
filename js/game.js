@@ -674,12 +674,14 @@ export class Game {
     const { blockOpen, blocksX, blocksY, openCells, obstacleComponents } = this.blockGrid;
     const isAgent2 = this.mapStrategy === 'agent2';
 
-    // Agent mode 2 gets one goal per racer (clustered so every goal cell has
-    // a goal neighbour); every other strategy keeps the single shared goal
-    // nearest the map centre.
+    // Agent mode 2 gets one goal per racer, scattered across the map (the
+    // obstacle grid already guarantees every open cell is one connected
+    // region, so any goal is reachable from anywhere - no special placement
+    // constraint is needed beyond spreading them out); every other strategy
+    // keeps the single shared goal nearest the map centre.
     let goalCells;
     if (isAgent2) {
-      goalCells = this._pickClusteredGoals(openCells, this.racerCount);
+      goalCells = this._pickScatteredGoals(openCells, this.racerCount);
     } else {
       const center = { fx: (blocksX - 1) / 2, fy: (blocksY - 1) / 2 };
       goalCells = [[...openCells].sort((a, b) =>
@@ -705,16 +707,17 @@ export class Game {
       starts.push({ fx: best.fx, fy: best.fy });
     }
 
-    // Agent mode 2's shared knowledge: one dead-end-pruned "skeleton" graph
-    // (protecting every start and every goal from pruning, so no route
-    // between any of them is ever lost), then a nearest-distance match of
-    // each racer to its own goal computed on that same shared graph.
-    this.agent2PrunedOpen = null;
-    let assignments = null;
+    // Agent mode 2: nobody knows the map or any goal location up front.
+    // this.agent2KnownOpen/KnownWall is the one shared "sensed so far" map -
+    // every racer only ever adds to it and reads from it, never from
+    // blockGrid directly, and this.agent2SharedVisits is one shared
+    // visit-count table so racers collectively avoid re-covering already
+    // explored ground instead of each remembering only their own steps.
     if (isAgent2) {
-      const protectedCells = new Set([...starts, ...goalCells].map((c) => `${c.fx},${c.fy}`));
-      this.agent2PrunedOpen = this._buildPrunedOpen(blockOpen, blocksX, blocksY, protectedCells);
-      assignments = this._assignGoals(starts, goalCells, this.agent2PrunedOpen, blocksX);
+      this.agent2KnownOpen = new Set();
+      this.agent2KnownWall = new Set();
+      this.agent2Discovered = []; // [{ bx, by, trail, claimedBy }] as goals are found
+      this.agent2SharedVisits = new Map(starts.map((s) => [`${s.fx},${s.fy}`, 1]));
     }
 
     const cellSize = this.forwardStep;
@@ -765,12 +768,11 @@ export class Game {
     });
 
     const goalGeo = new THREE.CircleGeometry(cellSize * 0.32, 24);
-    this.mapGoalMarkers = this.mapGoals.map((goal, gi) => {
-      // In agent2 mode each goal belongs to one specific racer - tint its
-      // marker to match, so it reads as "that racer's finish", not a shared sink.
-      const racerIndex = isAgent2 ? assignments.findIndex((g) => g === goalCells[gi]) : -1;
-      const color = racerIndex >= 0 ? RACER_COLORS[racerIndex % RACER_COLORS.length] : 0x35b88a;
-      const marker = new THREE.Mesh(goalGeo, new THREE.MeshBasicMaterial({ color }));
+    // In agent2 nobody owns a goal yet at setup time - ownership only exists
+    // once a racer actually stumbles onto one, so every marker starts neutral
+    // and gets re-tinted to its claimant's colour at that moment.
+    this.mapGoalMarkers = this.mapGoals.map((goal) => {
+      const marker = new THREE.Mesh(goalGeo, new THREE.MeshBasicMaterial({ color: 0x35b88a }));
       marker.rotation.x = -Math.PI / 2;
       marker.position.set(this._mapWorldX(goal.bx), 0.03, this._mapWorldZ(goal.by));
       this.scene.add(marker);
@@ -830,7 +832,8 @@ export class Game {
         status: 'solving',
         visitCounts: new Map([[`${start.fx},${start.fy}`, 1]]),
         trail: [{ fx: start.fx, fy: start.fy }],
-        assignedGoal: isAgent2 ? { bx: assignments[i].fx, by: assignments[i].fy } : this.mapGoal,
+        assignedGoal: isAgent2 ? null : this.mapGoal,
+        claimedGoal: null,
         pathColor,
         pathDots,
         pathGlow,
@@ -891,9 +894,35 @@ export class Game {
     racer.steps += 1;
     racer.visitCounts.set(`${racer.bx},${racer.by}`, (racer.visitCounts.get(`${racer.bx},${racer.by}`) || 0) + 1);
     if (this.mapStrategy === 'agent') racer.trail.push({ fx: racer.bx, fy: racer.by });
+    if (this.mapStrategy === 'agent2') {
+      const visitKey = `${racer.bx},${racer.by}`;
+      this.agent2SharedVisits.set(visitKey, (this.agent2SharedVisits.get(visitKey) || 0) + 1);
+      racer.trail.push({ fx: racer.bx, fy: racer.by });
+    }
     racer.shape.startMove(dir);
     racer.pendingDir = dir;
-    if (racer.bx === racer.assignedGoal.bx && racer.by === racer.assignedGoal.by) {
+
+    if (this.mapStrategy === 'agent2') {
+      // assignedGoal stays null until claimed, so this strategy can't use
+      // the generic assignedGoal check below - it tests against any of the
+      // N goals instead, then records/claims whichever one was just found.
+      if (this._isMapGoal(racer.bx, racer.by)) {
+        let entry = this.agent2Discovered.find((g) => g.bx === racer.bx && g.by === racer.by);
+        if (!entry) {
+          entry = { bx: racer.bx, by: racer.by, trail: racer.trail.slice(), claimedBy: racer.id };
+          this.agent2Discovered.push(entry);
+        } else if (entry.claimedBy === null) {
+          entry.claimedBy = racer.id;
+        }
+        if (entry.claimedBy === racer.id) {
+          racer.status = 'reached';
+          racer.claimedGoal = entry;
+          this._updateMapPathDots(racer, null);
+          const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);
+          if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(RACER_COLORS[racer.id % RACER_COLORS.length]);
+        }
+      }
+    } else if (racer.bx === racer.assignedGoal.bx && racer.by === racer.assignedGoal.by) {
       racer.status = 'reached';
       this._updateMapPathDots(racer, null);
       if (this.mapStrategy === 'agent' && !this.agentGoalKnown) {
@@ -1130,179 +1159,148 @@ export class Game {
     return this._chooseLocalYieldMove(racer, next);
   }
 
-  // "Agent" strategy 2: every racer's goal is known up front (no blind
-  // search), but there's one goal per racer instead of one shared goal.
-  // Goals are grown as small connected clusters - every goal cell has at
-  // least one neighbouring goal cell - so a lone unreachable-looking goal
-  // never appears; pairs are the default shape, with one triple absorbing
-  // the remainder when the racer count is odd. With a single racer there's
-  // no partner to cluster with, so the adjacency requirement is relaxed.
-  _pickClusteredGoals(openCells, count) {
+  // "Agent" strategy 2's N goals just need to be spread out across the map -
+  // full connectivity of every open cell is already guaranteed by
+  // generateObstacleGrid, so any goal is reachable from anywhere without
+  // any special adjacency requirement between goals.
+  _pickScatteredGoals(openCells, count) {
     const goals = [];
-    const goalKeys = new Set();
-    const isOpenCell = (x, y) => this.blockGrid.blockOpen(x, y);
-    const neighborsOf = (cell) => [[1, 0], [-1, 0], [0, 1], [0, -1]]
-      .map(([dx, dy]) => ({ fx: cell.fx + dx, fy: cell.fy + dy }))
-      .filter((c) => isOpenCell(c.fx, c.fy));
-
-    const pickAnchor = () => {
-      // Spread cluster anchors out using the same max-min distance heuristic
-      // used for start placement, so clusters land away from each other.
+    for (let i = 0; i < count; i++) {
       let best = null;
       let bestScore = -Infinity;
       for (const cell of openCells) {
-        const key = `${cell.fx},${cell.fy}`;
-        if (goalKeys.has(key)) continue;
+        if (goals.some((g) => g.fx === cell.fx && g.fy === cell.fy)) continue;
         const score = goals.length
           ? Math.min(...goals.map((g) => Math.abs(cell.fx - g.fx) + Math.abs(cell.fy - g.fy)))
           : Math.random();
         if (score > bestScore) { bestScore = score; best = cell; }
       }
-      return best;
-    };
-
-    if (count <= 1) {
-      const anchor = pickAnchor();
-      if (anchor) { goals.push(anchor); goalKeys.add(`${anchor.fx},${anchor.fy}`); }
-      return goals;
-    }
-
-    const clusterSizes = [];
-    let remaining = count;
-    if (remaining % 2 === 1) { clusterSizes.push(3); remaining -= 3; }
-    while (remaining > 0) { clusterSizes.push(2); remaining -= 2; }
-
-    for (const size of clusterSizes) {
-      const anchor = pickAnchor();
-      if (!anchor) break;
-      const cluster = [anchor];
-      goals.push(anchor);
-      goalKeys.add(`${anchor.fx},${anchor.fy}`);
-      while (cluster.length < size) {
-        // Grow from any current member so the cluster stays one connected
-        // blob (every cell touches at least one other cell in its cluster).
-        let candidate = null;
-        for (const member of cluster) {
-          const free = neighborsOf(member).filter((c) => !goalKeys.has(`${c.fx},${c.fy}`));
-          if (free.length) { candidate = free[Math.floor(Math.random() * free.length)]; break; }
-        }
-        if (!candidate) break; // boxed in - accept a smaller cluster rather than looping forever
-        cluster.push(candidate);
-        goals.push(candidate);
-        goalKeys.add(`${candidate.fx},${candidate.fy}`);
-      }
+      if (best) goals.push(best);
     }
     return goals;
   }
 
-  // Iteratively strips every open cell that is not a start or a goal and has
-  // at most one still-open neighbour - a dead end that, by definition, can
-  // never lie on a shortest path between two other points. Stripping a leaf
-  // can turn its former neighbour into a new leaf, so removal cascades
-  // outward from every dead end until only the "skeleton" connecting all
-  // starts and goals remains. Every racer's A* then searches this one
-  // shared, pre-shrunk graph instead of the full map.
-  _buildPrunedOpen(blockOpen, blocksX, blocksY, protectedKeys) {
-    const alive = new Set();
-    for (let y = 0; y < blocksY; y++) {
-      for (let x = 0; x < blocksX; x++) {
-        if (blockOpen(x, y)) alive.add(`${x},${y}`);
-      }
+  // "Agent" strategy 2: nobody knows the map or any goal location in
+  // advance. Each racer only ever senses its own immediate surroundings,
+  // recorded into the one shared agent2KnownOpen/KnownWall map so every
+  // racer (and, once a goal turns up, whoever claims it) works off the same
+  // growing picture instead of its own private one.
+  _agent2Sense(racer) {
+    const { bx, by } = racer;
+    this.agent2KnownOpen.add(`${bx},${by}`);
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = bx + dx, ny = by + dy;
+      const key = `${nx},${ny}`;
+      if (this.agent2KnownOpen.has(key) || this.agent2KnownWall.has(key)) continue;
+      if (this.blockGrid.blockOpen(nx, ny)) this.agent2KnownOpen.add(key);
+      else this.agent2KnownWall.add(key);
     }
+  }
+
+  // Re-derives the "obvious dead ends" within the currently known map only -
+  // recomputed fresh each time from the small (<=441-cell) known set rather
+  // than maintained incrementally, since it's cheap and much simpler to get
+  // right. Protects every still-searching racer's current cell (it's
+  // standing there, not a dead end) and every discovered goal.
+  //
+  // Unlike a full-map prune, a cell here has three possible neighbour states
+  // - known-open, known-wall, or not sensed at all - and only the first two
+  // are resolved. A neighbour that hasn't been sensed yet might still be the
+  // way out, so a cell may only be judged (and possibly pruned as a dead
+  // end) once ALL four of its neighbours are resolved; otherwise leaving an
+  // unsensed side would make an ordinary exploration frontier look like a
+  // dead end and get avoided before it was ever explored.
+  _agent2ComputeKnownPruned() {
+    const protectedCells = new Set();
+    for (const r of this.mapRacers) if (r.status === 'solving') protectedCells.add(`${r.bx},${r.by}`);
+    for (const g of this.agent2Discovered) protectedCells.add(`${g.bx},${g.by}`);
+
+    const alive = new Set(this.agent2KnownOpen);
     const neighborKeysOf = (x, y) => [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => `${x + dx},${y + dy}`);
+    const fullySensed = (x, y) => neighborKeysOf(x, y)
+      .every((k) => this.agent2KnownOpen.has(k) || this.agent2KnownWall.has(k));
     const liveDegree = (x, y) => neighborKeysOf(x, y).filter((k) => alive.has(k)).length;
+    const prunable = (x, y) => fullySensed(x, y) && liveDegree(x, y) <= 1;
 
     const queue = [];
     for (const key of alive) {
-      if (protectedKeys.has(key)) continue;
+      if (protectedCells.has(key)) continue;
       const [x, y] = key.split(',').map(Number);
-      if (liveDegree(x, y) <= 1) queue.push(key);
+      if (prunable(x, y)) queue.push(key);
     }
     let head = 0;
     while (head < queue.length) {
       const key = queue[head++];
-      if (!alive.has(key) || protectedKeys.has(key)) continue;
+      if (!alive.has(key) || protectedCells.has(key)) continue;
       const [x, y] = key.split(',').map(Number);
-      if (liveDegree(x, y) > 1) continue; // an earlier removal left this with >1 neighbour after all
+      if (!prunable(x, y)) continue; // an earlier removal left this with >1 live neighbour after all
       alive.delete(key);
       for (const nk of neighborKeysOf(x, y)) {
-        if (!alive.has(nk) || protectedKeys.has(nk)) continue;
+        if (!alive.has(nk) || protectedCells.has(nk)) continue;
         const [nx, ny] = nk.split(',').map(Number);
-        if (liveDegree(nx, ny) <= 1) queue.push(nk);
+        if (prunable(nx, ny)) queue.push(nk);
       }
     }
     return (x, y) => alive.has(`${x},${y}`);
   }
 
-  // Matches each start to its own goal by greedy nearest-distance (measured
-  // on the shared pruned graph): sort every start/goal pair by distance,
-  // then walk the list claiming the closest still-free pair for each. This
-  // isn't a globally optimal assignment (that would need the Hungarian
-  // algorithm), but it's a simple, fast approximation that keeps racers from
-  // being sent clear across the map to a goal someone closer could take.
-  _assignGoals(starts, goalCells, isOpen, gridW) {
-    const key = (x, y) => y * gridW + x;
-    const distFromGoal = goalCells.map((g) => {
-      const dist = new Map([[key(g.fx, g.fy), 0]]);
-      const queue = [g];
-      let head = 0;
-      while (head < queue.length) {
-        const cur = queue[head++];
-        const d = dist.get(key(cur.fx, cur.fy));
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const nx = cur.fx + dx, ny = cur.fy + dy;
-          if (!isOpen(nx, ny)) continue;
-          const nk = key(nx, ny);
-          if (dist.has(nk)) continue;
-          dist.set(nk, d + 1);
-          queue.push({ fx: nx, fy: ny });
-        }
-      }
-      return dist;
-    });
+  // Blind wandering: only the racer's own immediate, just-sensed neighbours
+  // are candidates (never anything from the true map), preferring whichever
+  // is least-visited across the whole shared swarm (not just this racer's
+  // own history) and steering away from pockets the shared knowledge has
+  // already proven are dead ends, so nobody re-walks a known-empty branch.
+  _chooseAgent2ExploreMove(racer) {
+    const candidates = Object.values(MAP_DIR_DELTAS)
+      .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
+      .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
+    if (!candidates.length) return null;
 
-    const pairs = [];
-    starts.forEach((s, si) => {
-      goalCells.forEach((g, gi) => {
-        const d = distFromGoal[gi].get(key(s.fx, s.fy));
-        pairs.push({ si, gi, d: d === undefined ? Infinity : d });
-      });
-    });
-    pairs.sort((a, b) => a.d - b.d);
+    const knownPruned = this._agent2ComputeKnownPruned();
+    const fresh = candidates.filter((cell) => knownPruned(cell.fx, cell.fy));
+    const pool = fresh.length ? fresh : candidates;
 
-    const startTaken = new Array(starts.length).fill(false);
-    const goalTaken = new Array(goalCells.length).fill(false);
-    const result = new Array(starts.length).fill(null);
-    for (const { si, gi } of pairs) {
-      if (startTaken[si] || goalTaken[gi]) continue;
-      startTaken[si] = true;
-      goalTaken[gi] = true;
-      result[si] = goalCells[gi];
-    }
-    for (let si = 0; si < starts.length; si++) {
-      if (result[si]) continue;
-      const gi = goalTaken.findIndex((taken) => !taken);
-      result[si] = goalCells[gi >= 0 ? gi : 0];
-      if (gi >= 0) goalTaken[gi] = true;
-    }
-    return result;
+    pool.sort((a, b) => {
+      const visitsA = this.agent2SharedVisits.get(`${a.fx},${a.fy}`) || 0;
+      const visitsB = this.agent2SharedVisits.get(`${b.fx},${b.fy}`) || 0;
+      if (visitsA !== visitsB) return visitsA - visitsB;
+      return Math.random() - 0.5;
+    });
+    return pool[0];
   }
 
-  _chooseAgent2Move(racer) {
+  // Once claimed, a racer heads for the nearest cell on ITS claimed goal's
+  // discovery trail and rides it in - exactly agent-mode-1's "reference the
+  // discoverer's path" idea, generalized to one trail per goal. The approach
+  // leg is only ever searched through agent2KnownOpen (what's actually been
+  // sensed so far), never the true map, so a still-unconnected claim simply
+  // fails to produce a path yet rather than "knowing" a shortcut nobody
+  // sensed.
+  _buildAgent2TrailPath(racer) {
+    const trail = racer.claimedGoal?.trail;
+    if (!trail || !trail.length) return null;
+
+    let joinIndex = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < trail.length; i++) {
+      const d = Math.abs(trail[i].fx - racer.bx) + Math.abs(trail[i].fy - racer.by);
+      if (d < bestDist) { bestDist = d; joinIndex = i; }
+    }
+    const joinCell = trail[joinIndex];
+
+    let approach;
+    if (racer.bx === joinCell.fx && racer.by === joinCell.fy) {
+      approach = [{ fx: racer.bx, fy: racer.by }];
+    } else {
+      const knownOpen = (x, y) => this.agent2KnownOpen.has(`${x},${y}`);
+      approach = findPath(knownOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: joinCell.fx, fy: joinCell.fy });
+      if (!approach) return null; // known map doesn't connect there yet
+    }
+    return approach.concat(trail.slice(joinIndex + 1));
+  }
+
+  _chooseAgent2TrailMove(racer) {
     if (!racer.path || racer.pathIndex >= racer.path.length - 1) {
-      const staticOpen = (x, y) => this.agent2PrunedOpen(x, y) &&
-        !(racer.avoidSteps > 0 && racer.avoidCell && x === racer.avoidCell.bx && y === racer.avoidCell.by);
-      racer.path = findPath(
-        staticOpen,
-        this.blockGrid.blocksX,
-        { fx: racer.bx, fy: racer.by },
-        { fx: racer.assignedGoal.bx, fy: racer.assignedGoal.by }
-      ) || findPath(
-        this.blockGrid.blockOpen,
-        this.blockGrid.blocksX,
-        { fx: racer.bx, fy: racer.by },
-        { fx: racer.assignedGoal.bx, fy: racer.assignedGoal.by }
-      );
+      racer.path = this._buildAgent2TrailPath(racer);
       racer.pathIndex = 0;
       this._updateMapPathDots(racer, racer.path);
     }
@@ -1311,10 +1309,6 @@ export class Game {
     const next = racer.path[racer.pathIndex + 1];
     if (this._mapCellAvailable(next.fx, next.fy, racer)) {
       racer.blockedAttempts = 0;
-      if (racer.avoidSteps > 0) {
-        racer.avoidSteps -= 1;
-        if (!racer.avoidSteps) racer.avoidCell = null;
-      }
       racer.pathIndex += 1;
       this._updateMapPathDots(racer, racer.path.slice(racer.pathIndex));
       return next;
@@ -1323,6 +1317,35 @@ export class Game {
     racer.blockedAttempts += 1;
     if (racer.blockedAttempts < 30) return null;
     return this._chooseLocalYieldMove(racer, next);
+  }
+
+  _chooseAgent2Move(racer) {
+    this._agent2Sense(racer);
+
+    if (!racer.claimedGoal) {
+      const claimable = this.agent2Discovered.filter((g) => g.claimedBy === null);
+      if (claimable.length) {
+        // Chase whichever already-discovered, still-unclaimed goal is
+        // nearest in a straight line - a cheap proxy for travel distance
+        // when there may be no known route to it yet.
+        claimable.sort((a, b) =>
+          (Math.abs(a.bx - racer.bx) + Math.abs(a.by - racer.by)) -
+          (Math.abs(b.bx - racer.bx) + Math.abs(b.by - racer.by))
+        );
+        const chosen = claimable[0];
+        chosen.claimedBy = racer.id;
+        racer.claimedGoal = chosen;
+        racer.path = null;
+      }
+    }
+
+    if (racer.claimedGoal) {
+      const move = this._chooseAgent2TrailMove(racer);
+      if (move) return move;
+      // No known route to the claimed goal yet - keep exploring (which also
+      // keeps growing the shared known map) until one turns up.
+    }
+    return this._chooseAgent2ExploreMove(racer);
   }
 
   // ---------------------------------------------------------------------
