@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
-import { Renderer2D } from './renderer2d.js?v=31';
+import { Renderer2D } from './renderer2d.js?v=32';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -126,9 +126,19 @@ export class Game {
   }
 
   toggleMapStrategy() {
-    const order = ['path', 'explore', 'agent'];
+    const order = ['path', 'explore', 'agent', 'agent2'];
+    const previous = this.mapStrategy;
     this.mapStrategy = order[(order.indexOf(this.mapStrategy) + 1) % order.length];
     if (this.gameType === 'map') {
+      // agent2's one-goal-per-racer layout is a different map topology than
+      // every other strategy's single shared goal - crossing that boundary
+      // needs a full regeneration, not just clearing each racer's memory.
+      if ((previous === 'agent2') !== (this.mapStrategy === 'agent2')) {
+        this._teardownMapMode();
+        this._setupMapMode();
+        this._reportStats();
+        return this.mapStrategy;
+      }
       this.agentGoalKnown = false;
       this.agentTrail = null;
       for (const racer of this.mapRacers) {
@@ -662,26 +672,49 @@ export class Game {
     this.agentGoalKnown = false;
     this.agentTrail = null;
     const { blockOpen, blocksX, blocksY, openCells, obstacleComponents } = this.blockGrid;
-    const center = { fx: (blocksX - 1) / 2, fy: (blocksY - 1) / 2 };
-    const goalCell = [...openCells].sort((a, b) =>
-      (Math.abs(a.fx - center.fx) + Math.abs(a.fy - center.fy)) -
-      (Math.abs(b.fx - center.fx) + Math.abs(b.fy - center.fy))
-    )[0];
-    this.mapGoal = { bx: goalCell.fx, by: goalCell.fy };
+    const isAgent2 = this.mapStrategy === 'agent2';
+
+    // Agent mode 2 gets one goal per racer (clustered so every goal cell has
+    // a goal neighbour); every other strategy keeps the single shared goal
+    // nearest the map centre.
+    let goalCells;
+    if (isAgent2) {
+      goalCells = this._pickClusteredGoals(openCells, this.racerCount);
+    } else {
+      const center = { fx: (blocksX - 1) / 2, fy: (blocksY - 1) / 2 };
+      goalCells = [[...openCells].sort((a, b) =>
+        (Math.abs(a.fx - center.fx) + Math.abs(a.fy - center.fy)) -
+        (Math.abs(b.fx - center.fx) + Math.abs(b.fy - center.fy))
+      )[0]];
+    }
+    this.mapGoals = goalCells.map((c) => ({ bx: c.fx, by: c.fy }));
+    this.mapGoal = this.mapGoals[0];
 
     const starts = [];
     for (let i = 0; i < this.racerCount; i++) {
       let best = null;
       let bestScore = -Infinity;
       for (const cell of openCells) {
-        if (cell.fx === goalCell.fx && cell.fy === goalCell.fy) continue;
+        if (goalCells.some((g) => g.fx === cell.fx && g.fy === cell.fy)) continue;
         if (starts.some((start) => Math.abs(cell.fx - start.fx) + Math.abs(cell.fy - start.fy) <= 1)) continue;
-        const distances = [Math.abs(cell.fx - goalCell.fx) + Math.abs(cell.fy - goalCell.fy)];
+        const distances = goalCells.map((g) => Math.abs(cell.fx - g.fx) + Math.abs(cell.fy - g.fy));
         for (const start of starts) distances.push(Math.abs(cell.fx - start.fx) + Math.abs(cell.fy - start.fy));
         const score = Math.min(...distances);
         if (score > bestScore) { bestScore = score; best = cell; }
       }
       starts.push({ fx: best.fx, fy: best.fy });
+    }
+
+    // Agent mode 2's shared knowledge: one dead-end-pruned "skeleton" graph
+    // (protecting every start and every goal from pruning, so no route
+    // between any of them is ever lost), then a nearest-distance match of
+    // each racer to its own goal computed on that same shared graph.
+    this.agent2PrunedOpen = null;
+    let assignments = null;
+    if (isAgent2) {
+      const protectedCells = new Set([...starts, ...goalCells].map((c) => `${c.fx},${c.fy}`));
+      this.agent2PrunedOpen = this._buildPrunedOpen(blockOpen, blocksX, blocksY, protectedCells);
+      assignments = this._assignGoals(starts, goalCells, this.agent2PrunedOpen, blocksX);
     }
 
     const cellSize = this.forwardStep;
@@ -732,16 +765,17 @@ export class Game {
     });
 
     const goalGeo = new THREE.CircleGeometry(cellSize * 0.32, 24);
-    const goalMat = new THREE.MeshBasicMaterial({ color: 0x35b88a });
-    const goalMarker = new THREE.Mesh(goalGeo, goalMat);
-    goalMarker.rotation.x = -Math.PI / 2;
-    goalMarker.position.set(
-      this._mapWorldX(this.mapGoal.bx),
-      0.03,
-      this._mapWorldZ(this.mapGoal.by)
-    );
-    this.scene.add(goalMarker);
-    this.mapGoalMarker = goalMarker;
+    this.mapGoalMarkers = this.mapGoals.map((goal, gi) => {
+      // In agent2 mode each goal belongs to one specific racer - tint its
+      // marker to match, so it reads as "that racer's finish", not a shared sink.
+      const racerIndex = isAgent2 ? assignments.findIndex((g) => g === goalCells[gi]) : -1;
+      const color = racerIndex >= 0 ? RACER_COLORS[racerIndex % RACER_COLORS.length] : 0x35b88a;
+      const marker = new THREE.Mesh(goalGeo, new THREE.MeshBasicMaterial({ color }));
+      marker.rotation.x = -Math.PI / 2;
+      marker.position.set(this._mapWorldX(goal.bx), 0.03, this._mapWorldZ(goal.by));
+      this.scene.add(marker);
+      return marker;
+    });
 
     this.mapRacers = [];
     for (let i = 0; i < this.racerCount; i++) {
@@ -796,6 +830,7 @@ export class Game {
         status: 'solving',
         visitCounts: new Map([[`${start.fx},${start.fy}`, 1]]),
         trail: [{ fx: start.fx, fy: start.fy }],
+        assignedGoal: isAgent2 ? { bx: assignments[i].fx, by: assignments[i].fy } : this.mapGoal,
         pathColor,
         pathDots,
         pathGlow,
@@ -815,7 +850,8 @@ export class Game {
     this.scene.remove(this.mapGround);
     for (const wall of this.mapWalls) this.scene.remove(wall);
     this.mapWalls = [];
-    this.scene.remove(this.mapGoalMarker);
+    for (const marker of this.mapGoalMarkers || []) this.scene.remove(marker);
+    this.mapGoalMarkers = [];
     for (const racer of (this.mapRacers || [])) {
       this.scene.remove(racer.pathDots);
       this.scene.remove(racer.pathGlow);
@@ -839,6 +875,8 @@ export class Game {
       next = this._chooseExplorationMove(racer);
     } else if (this.mapStrategy === 'agent') {
       next = this.agentGoalKnown ? this._chooseDiscoveredPathMove(racer) : this._chooseAgentExploreMove(racer);
+    } else if (this.mapStrategy === 'agent2') {
+      next = this._chooseAgent2Move(racer);
     } else {
       next = this._choosePathMove(racer);
     }
@@ -855,7 +893,7 @@ export class Game {
     if (this.mapStrategy === 'agent') racer.trail.push({ fx: racer.bx, fy: racer.by });
     racer.shape.startMove(dir);
     racer.pendingDir = dir;
-    if (racer.bx === this.mapGoal.bx && racer.by === this.mapGoal.by) {
+    if (racer.bx === racer.assignedGoal.bx && racer.by === racer.assignedGoal.by) {
       racer.status = 'reached';
       this._updateMapPathDots(racer, null);
       if (this.mapStrategy === 'agent' && !this.agentGoalKnown) {
@@ -869,7 +907,7 @@ export class Game {
   }
 
   _isMapGoal(x, y) {
-    return x === this.mapGoal.bx && y === this.mapGoal.by;
+    return this.mapGoals.some((g) => g.bx === x && g.by === y);
   }
 
   _mapCellAvailable(x, y, racer) {
@@ -893,7 +931,7 @@ export class Game {
         staticOpen,
         this.blockGrid.blocksX,
         { fx: racer.bx, fy: racer.by },
-        { fx: this.mapGoal.bx, fy: this.mapGoal.by }
+        { fx: racer.assignedGoal.bx, fy: racer.assignedGoal.by }
       );
       if (!racer.path && racer.avoidSteps > 0) {
         racer.avoidSteps = 0;
@@ -902,7 +940,7 @@ export class Game {
           this.blockGrid.blockOpen,
           this.blockGrid.blocksX,
           { fx: racer.bx, fy: racer.by },
-          { fx: this.mapGoal.bx, fy: this.mapGoal.by }
+          { fx: racer.assignedGoal.bx, fy: racer.assignedGoal.by }
         );
       }
       racer.pathIndex = 0;
@@ -961,7 +999,7 @@ export class Game {
         .filter((other) => other !== racer && other.status !== 'reached')
         .map((other) => Math.abs(other.bx - cell.fx) + Math.abs(other.by - cell.fy)), 99);
       const score = (cell) => clearance(cell) * 100 -
-        Math.abs(cell.fx - this.mapGoal.bx) - Math.abs(cell.fy - this.mapGoal.by);
+        Math.abs(cell.fx - racer.assignedGoal.bx) - Math.abs(cell.fy - racer.assignedGoal.by);
       return score(b) - score(a);
     });
     racer.blockedAttempts = 0;
@@ -975,7 +1013,8 @@ export class Game {
 
   _updateMapPathDots(racer, path) {
     if (!racer.pathDots) return;
-    if ((this.mapStrategy !== 'path' && this.mapStrategy !== 'agent') || !path || path.length < 2) {
+    const showsDots = this.mapStrategy === 'path' || this.mapStrategy === 'agent' || this.mapStrategy === 'agent2';
+    if (!showsDots || !path || path.length < 2) {
       racer.pathDots.count = 0;
       racer.pathGlow.count = 0;
       racer.pathDots.instanceMatrix.needsUpdate = true;
@@ -1013,8 +1052,8 @@ export class Game {
       const visitsA = racer.visitCounts.get(`${a.fx},${a.fy}`) || 0;
       const visitsB = racer.visitCounts.get(`${b.fx},${b.fy}`) || 0;
       if (visitsA !== visitsB) return visitsA - visitsB;
-      const goalA = Math.abs(a.fx - this.mapGoal.bx) + Math.abs(a.fy - this.mapGoal.by);
-      const goalB = Math.abs(b.fx - this.mapGoal.bx) + Math.abs(b.fy - this.mapGoal.by);
+      const goalA = Math.abs(a.fx - racer.assignedGoal.bx) + Math.abs(a.fy - racer.assignedGoal.by);
+      const goalB = Math.abs(b.fx - racer.assignedGoal.bx) + Math.abs(b.fy - racer.assignedGoal.by);
       return goalA - goalB || Math.random() - 0.5;
     });
     return candidates[0];
@@ -1081,6 +1120,201 @@ export class Game {
     const next = racer.path[racer.pathIndex + 1];
     if (this._mapCellAvailable(next.fx, next.fy, racer)) {
       racer.blockedAttempts = 0;
+      racer.pathIndex += 1;
+      this._updateMapPathDots(racer, racer.path.slice(racer.pathIndex));
+      return next;
+    }
+
+    racer.blockedAttempts += 1;
+    if (racer.blockedAttempts < 30) return null;
+    return this._chooseLocalYieldMove(racer, next);
+  }
+
+  // "Agent" strategy 2: every racer's goal is known up front (no blind
+  // search), but there's one goal per racer instead of one shared goal.
+  // Goals are grown as small connected clusters - every goal cell has at
+  // least one neighbouring goal cell - so a lone unreachable-looking goal
+  // never appears; pairs are the default shape, with one triple absorbing
+  // the remainder when the racer count is odd. With a single racer there's
+  // no partner to cluster with, so the adjacency requirement is relaxed.
+  _pickClusteredGoals(openCells, count) {
+    const goals = [];
+    const goalKeys = new Set();
+    const isOpenCell = (x, y) => this.blockGrid.blockOpen(x, y);
+    const neighborsOf = (cell) => [[1, 0], [-1, 0], [0, 1], [0, -1]]
+      .map(([dx, dy]) => ({ fx: cell.fx + dx, fy: cell.fy + dy }))
+      .filter((c) => isOpenCell(c.fx, c.fy));
+
+    const pickAnchor = () => {
+      // Spread cluster anchors out using the same max-min distance heuristic
+      // used for start placement, so clusters land away from each other.
+      let best = null;
+      let bestScore = -Infinity;
+      for (const cell of openCells) {
+        const key = `${cell.fx},${cell.fy}`;
+        if (goalKeys.has(key)) continue;
+        const score = goals.length
+          ? Math.min(...goals.map((g) => Math.abs(cell.fx - g.fx) + Math.abs(cell.fy - g.fy)))
+          : Math.random();
+        if (score > bestScore) { bestScore = score; best = cell; }
+      }
+      return best;
+    };
+
+    if (count <= 1) {
+      const anchor = pickAnchor();
+      if (anchor) { goals.push(anchor); goalKeys.add(`${anchor.fx},${anchor.fy}`); }
+      return goals;
+    }
+
+    const clusterSizes = [];
+    let remaining = count;
+    if (remaining % 2 === 1) { clusterSizes.push(3); remaining -= 3; }
+    while (remaining > 0) { clusterSizes.push(2); remaining -= 2; }
+
+    for (const size of clusterSizes) {
+      const anchor = pickAnchor();
+      if (!anchor) break;
+      const cluster = [anchor];
+      goals.push(anchor);
+      goalKeys.add(`${anchor.fx},${anchor.fy}`);
+      while (cluster.length < size) {
+        // Grow from any current member so the cluster stays one connected
+        // blob (every cell touches at least one other cell in its cluster).
+        let candidate = null;
+        for (const member of cluster) {
+          const free = neighborsOf(member).filter((c) => !goalKeys.has(`${c.fx},${c.fy}`));
+          if (free.length) { candidate = free[Math.floor(Math.random() * free.length)]; break; }
+        }
+        if (!candidate) break; // boxed in - accept a smaller cluster rather than looping forever
+        cluster.push(candidate);
+        goals.push(candidate);
+        goalKeys.add(`${candidate.fx},${candidate.fy}`);
+      }
+    }
+    return goals;
+  }
+
+  // Iteratively strips every open cell that is not a start or a goal and has
+  // at most one still-open neighbour - a dead end that, by definition, can
+  // never lie on a shortest path between two other points. Stripping a leaf
+  // can turn its former neighbour into a new leaf, so removal cascades
+  // outward from every dead end until only the "skeleton" connecting all
+  // starts and goals remains. Every racer's A* then searches this one
+  // shared, pre-shrunk graph instead of the full map.
+  _buildPrunedOpen(blockOpen, blocksX, blocksY, protectedKeys) {
+    const alive = new Set();
+    for (let y = 0; y < blocksY; y++) {
+      for (let x = 0; x < blocksX; x++) {
+        if (blockOpen(x, y)) alive.add(`${x},${y}`);
+      }
+    }
+    const neighborKeysOf = (x, y) => [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => `${x + dx},${y + dy}`);
+    const liveDegree = (x, y) => neighborKeysOf(x, y).filter((k) => alive.has(k)).length;
+
+    const queue = [];
+    for (const key of alive) {
+      if (protectedKeys.has(key)) continue;
+      const [x, y] = key.split(',').map(Number);
+      if (liveDegree(x, y) <= 1) queue.push(key);
+    }
+    let head = 0;
+    while (head < queue.length) {
+      const key = queue[head++];
+      if (!alive.has(key) || protectedKeys.has(key)) continue;
+      const [x, y] = key.split(',').map(Number);
+      if (liveDegree(x, y) > 1) continue; // an earlier removal left this with >1 neighbour after all
+      alive.delete(key);
+      for (const nk of neighborKeysOf(x, y)) {
+        if (!alive.has(nk) || protectedKeys.has(nk)) continue;
+        const [nx, ny] = nk.split(',').map(Number);
+        if (liveDegree(nx, ny) <= 1) queue.push(nk);
+      }
+    }
+    return (x, y) => alive.has(`${x},${y}`);
+  }
+
+  // Matches each start to its own goal by greedy nearest-distance (measured
+  // on the shared pruned graph): sort every start/goal pair by distance,
+  // then walk the list claiming the closest still-free pair for each. This
+  // isn't a globally optimal assignment (that would need the Hungarian
+  // algorithm), but it's a simple, fast approximation that keeps racers from
+  // being sent clear across the map to a goal someone closer could take.
+  _assignGoals(starts, goalCells, isOpen, gridW) {
+    const key = (x, y) => y * gridW + x;
+    const distFromGoal = goalCells.map((g) => {
+      const dist = new Map([[key(g.fx, g.fy), 0]]);
+      const queue = [g];
+      let head = 0;
+      while (head < queue.length) {
+        const cur = queue[head++];
+        const d = dist.get(key(cur.fx, cur.fy));
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nx = cur.fx + dx, ny = cur.fy + dy;
+          if (!isOpen(nx, ny)) continue;
+          const nk = key(nx, ny);
+          if (dist.has(nk)) continue;
+          dist.set(nk, d + 1);
+          queue.push({ fx: nx, fy: ny });
+        }
+      }
+      return dist;
+    });
+
+    const pairs = [];
+    starts.forEach((s, si) => {
+      goalCells.forEach((g, gi) => {
+        const d = distFromGoal[gi].get(key(s.fx, s.fy));
+        pairs.push({ si, gi, d: d === undefined ? Infinity : d });
+      });
+    });
+    pairs.sort((a, b) => a.d - b.d);
+
+    const startTaken = new Array(starts.length).fill(false);
+    const goalTaken = new Array(goalCells.length).fill(false);
+    const result = new Array(starts.length).fill(null);
+    for (const { si, gi } of pairs) {
+      if (startTaken[si] || goalTaken[gi]) continue;
+      startTaken[si] = true;
+      goalTaken[gi] = true;
+      result[si] = goalCells[gi];
+    }
+    for (let si = 0; si < starts.length; si++) {
+      if (result[si]) continue;
+      const gi = goalTaken.findIndex((taken) => !taken);
+      result[si] = goalCells[gi >= 0 ? gi : 0];
+      if (gi >= 0) goalTaken[gi] = true;
+    }
+    return result;
+  }
+
+  _chooseAgent2Move(racer) {
+    if (!racer.path || racer.pathIndex >= racer.path.length - 1) {
+      const staticOpen = (x, y) => this.agent2PrunedOpen(x, y) &&
+        !(racer.avoidSteps > 0 && racer.avoidCell && x === racer.avoidCell.bx && y === racer.avoidCell.by);
+      racer.path = findPath(
+        staticOpen,
+        this.blockGrid.blocksX,
+        { fx: racer.bx, fy: racer.by },
+        { fx: racer.assignedGoal.bx, fy: racer.assignedGoal.by }
+      ) || findPath(
+        this.blockGrid.blockOpen,
+        this.blockGrid.blocksX,
+        { fx: racer.bx, fy: racer.by },
+        { fx: racer.assignedGoal.bx, fy: racer.assignedGoal.by }
+      );
+      racer.pathIndex = 0;
+      this._updateMapPathDots(racer, racer.path);
+    }
+    if (!racer.path || racer.path.length < 2) return null;
+
+    const next = racer.path[racer.pathIndex + 1];
+    if (this._mapCellAvailable(next.fx, next.fy, racer)) {
+      racer.blockedAttempts = 0;
+      if (racer.avoidSteps > 0) {
+        racer.avoidSteps -= 1;
+        if (!racer.avoidSteps) racer.avoidCell = null;
+      }
       racer.pathIndex += 1;
       this._updateMapPathDots(racer, racer.path.slice(racer.pathIndex));
       return next;

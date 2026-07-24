@@ -13,7 +13,6 @@ const GROUND = '#a3aab8';
 const WALL = '#8a8fa6';
 const WALL_EDGE = '#6f7488';
 const DIVIDER = '#f6f3ec';
-const GOAL = '#35b88a';
 
 export class Renderer2D {
   constructor(canvas, game) {
@@ -185,7 +184,7 @@ export class Renderer2D {
     // no precomputed route, so it intentionally draws no dots. Agent mode
     // reuses the same per-racer dots once a racer has grafted a route onto
     // the discovered trail (see above).
-    if (g.mapStrategy === 'path' || g.mapStrategy === 'agent') {
+    if (g.mapStrategy === 'path' || g.mapStrategy === 'agent' || g.mapStrategy === 'agent2') {
       for (const racer of g.mapRacers) {
         if (!racer.path || racer.status === 'reached') continue;
         const color = '#' + racer.pathColor.getHexString();
@@ -207,12 +206,12 @@ export class Renderer2D {
       }
     }
 
-    // Goal marker.
-    if (g.mapGoalMarker) {
-      const r = g.mapGoalMarker.geometry.parameters.radius * scale;
-      const cx = toX(g.mapGoalMarker.position.x);
-      const cy = toY(g.mapGoalMarker.position.z);
-      ctx.fillStyle = GOAL;
+    // Goal markers - one shared goal normally, one per racer in agent2.
+    for (const marker of g.mapGoalMarkers || []) {
+      const r = marker.geometry.parameters.radius * scale;
+      const cx = toX(marker.position.x);
+      const cy = toY(marker.position.z);
+      ctx.fillStyle = '#' + marker.material.color.getHexString();
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, Math.PI * 2);
       ctx.fill();
