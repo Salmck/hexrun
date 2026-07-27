@@ -995,17 +995,27 @@ export class Game {
     const blocker = this.mapRacers.find((other) => other !== racer && other.bx === next.fx && other.by === next.fy);
     if (!blocker) return false; // blocked by a wall, not a racer - nothing to clear
 
-    // Whoever is objectively closer to finishing its own current route wins
-    // the cell; the other waits or detours instead. Without this, two
-    // racers whose routes both genuinely need the same cell (a shared
-    // chokepoint) just keep evicting each other back and forth forever -
-    // racer A displaces B, B's own path says to come straight back so it
-    // does, immediately re-displacing A, on and on.
-    const racerRemaining = racer.path ? racer.path.length - racer.pathIndex : Infinity;
-    const blockerRemaining = blocker.path ? blocker.path.length - blocker.pathIndex : Infinity;
-    const racerHasPriority = racerRemaining < blockerRemaining ||
-      (racerRemaining === blockerRemaining && racer.id < blocker.id);
-    if (!racerHasPriority) return false;
+    // A reached agent2 racer's leftover path/pathIndex is just stale debris
+    // from the approach that got it there (typically almost fully
+    // consumed, e.g. length 2 / index 1) - it has no genuine "remaining
+    // route" to compare, and treating that leftover as real would make it
+    // outrank almost anyone trying to get past, so it would never budge.
+    // It should always be askable to step aside; _forceVacate's own
+    // depth-0 restriction is what actually bounds how far this reaches.
+    const blockerIsParked = this.mapStrategy === 'agent2' && blocker.status === 'reached';
+    if (!blockerIsParked) {
+      // Otherwise, whoever is objectively closer to finishing its own
+      // current route wins the cell; the other waits or detours instead.
+      // Without this, two racers whose routes both genuinely need the same
+      // cell (a shared chokepoint) just keep evicting each other back and
+      // forth forever - racer A displaces B, B's own path says to come
+      // straight back so it does, immediately re-displacing A, on and on.
+      const racerRemaining = racer.path ? racer.path.length - racer.pathIndex : Infinity;
+      const blockerRemaining = blocker.path ? blocker.path.length - blocker.pathIndex : Infinity;
+      const racerHasPriority = racerRemaining < blockerRemaining ||
+        (racerRemaining === blockerRemaining && racer.id < blocker.id);
+      if (!racerHasPriority) return false;
+    }
 
     if (!this._forceVacate(blocker, new Set([racer.id]))) return false;
     return this._mapCellAvailable(next.fx, next.fy, racer);
