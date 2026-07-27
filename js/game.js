@@ -724,6 +724,8 @@ export class Game {
       // separately, or a goal cell sensed only from next door would never
       // get a reason to be walked onto and stay hidden forever.
       this.agent2Visited = new Set(starts.map((s) => `${s.fx},${s.fy}`));
+      this._agent2PrevReached = 0;
+      this._agent2StallTicks = 0;
     }
 
     const cellSize = this.forwardStep;
@@ -834,6 +836,8 @@ export class Game {
         previousCell: null,
         avoidCell: null,
         avoidSteps: 0,
+        idleTicks: 0,
+        scatterSteps: 0,
         steps: 0,
         status: 'solving',
         visitCounts: new Map([[`${start.fx},${start.fy}`, 1]]),
@@ -889,11 +893,18 @@ export class Game {
     } else {
       next = this._choosePathMove(racer);
     }
+    // Count decision rounds where an agent2 racer couldn't move at all - a
+    // long streak means it's wedged in a deadlock the normal yield/bump
+    // logic can't break (a rotational cycle, or a goal only reachable across
+    // occupied ones). _chooseAgent2Move watches this and kicks the racer
+    // into a brief random scatter to shake the jam loose.
+    if (this.mapStrategy === 'agent2' && !next) racer.idleTicks += 1;
     if (!next) return;
     this._applyMapMove(racer, next);
   }
 
   _applyMapMove(racer, next) {
+    racer.idleTicks = 0; // it moved this round
     const dx = next.fx - racer.bx;
     const dy = next.fy - racer.by;
     const dir = dx === 1 ? RIGHT : dx === -1 ? LEFT : dy === 1 ? BACKWARD : FORWARD;
@@ -919,24 +930,19 @@ export class Game {
       // own goal cell's neighbours - exactly where an adjacent clustered
       // goal would be - would otherwise stay permanently unsensed and
       // invisible to every other racer's exploration.
-      this._agent2Sense(racer);
+      this._agent2Sense(racer); // also reveals this cell as a goal if it is one
       // assignedGoal stays null until claimed, so this strategy can't use
       // the generic assignedGoal check below - it tests against any of the
-      // N goals instead, then records/claims whichever one was just found.
+      // N goals instead.
       if (this._isMapGoal(racer.bx, racer.by)) {
-        let entry = this.agent2Discovered.find((g) => g.bx === racer.bx && g.by === racer.by);
-        if (!entry) {
-          entry = { bx: racer.bx, by: racer.by, trail: racer.trail.slice(), claimedBy: null };
-          this.agent2Discovered.push(entry);
-        }
-        // Only take a goal this racer doesn't already own - since goals
-        // cluster tightly, a racer walking back to its own goal after being
-        // displaced can easily cross a different, not-yet-discovered goal
-        // cell along the way. Without this check it would wrongly claim
-        // that one too (leaving its real goal orphaned and this new one
-        // permanently "claimed" by a racer that was never actually going
-        // to sit there), rather than just revealing it for someone else.
-        if (!racer.claimedGoal && entry.claimedBy === null) {
+        const entry = this.agent2Discovered.find((g) => g.bx === racer.bx && g.by === racer.by);
+        // Opportunistically settle onto the goal we happen to be standing on
+        // if it's free and isn't already ours - zero extra travel, and it
+        // releases whatever goal we were only still heading toward so someone
+        // else can take that instead. (A racer merely passing through a goal
+        // another racer has claimed just walks on; entry stays theirs.)
+        if (entry && entry.claimedBy === null && racer.claimedGoal !== entry) {
+          if (racer.claimedGoal && racer.claimedGoal.claimedBy === racer.id) racer.claimedGoal.claimedBy = null;
           entry.claimedBy = racer.id;
           racer.claimedGoal = entry;
         }
@@ -1064,8 +1070,18 @@ export class Game {
       racer.blockedAttempts = 0;
       this._updateMapPathDots(racer, null);
       if (canDisplaceReached) {
-        // It genuinely wants to go straight back to this exact cell (its
-        // own goal) - avoiding it would be counterproductive.
+        // Release the goal outright instead of forcing a march back to this
+        // exact cell. A yielded racer becomes a free solver again and will
+        // grab whichever discovered goal is nearest next tick - often the
+        // one it was just on (now free again), but just as happily a
+        // different free one. Rigidly making every displaced racer return
+        // to its ORIGINAL goal is what deadlocked tight clusters: racers
+        // ended up in a permutation cycle, each standing on the exact goal
+        // another was rigidly waiting for, with no one able to rotate.
+        // Freeing the claim lets the cluster resolve as "nearest free racer
+        // takes nearest free goal" instead.
+        if (racer.claimedGoal) racer.claimedGoal.claimedBy = null;
+        racer.claimedGoal = null;
         racer.status = 'solving';
       } else {
         // An ordinary bumped racer's very next A* replan will otherwise
@@ -1322,47 +1338,107 @@ export class Game {
     return this._chooseLocalYieldMove(racer, next);
   }
 
-  // "Agent" strategy 2: N goals clustered together (adjacent via 4-connectivity).
-  // Start with one goal, then each subsequent goal must be 4-adjacent to at least
-  // one already-placed goal, forming a contiguous cluster (挨在一起).
+  // Count goals with NO open, non-goal neighbour - i.e. fully walled in by
+  // walls and other goals. Such a goal can't be reached without crossing
+  // another goal, so once its neighbours are filled it becomes physically
+  // unreachable and the endgame deadlocks. Testing showed convergence is
+  // reliable exactly when this is zero, so _pickScatteredGoals retries goal
+  // placement until it is.
+  _countEnclosedGoals(goals) {
+    const gs = new Set(goals.map((g) => `${g.fx},${g.fy}`));
+    return goals.filter((g) => ![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => {
+      const nx = g.fx + dx, ny = g.fy + dy;
+      return this.blockGrid.blockOpen(nx, ny) && !gs.has(`${nx},${ny}`);
+    })).length;
+  }
+
+  // Grow N clustered goals, retrying from fresh random seeds until the whole
+  // layout has zero enclosed goals (guaranteeing every goal is reachable
+  // from the surrounding open map without crossing another). The maze is
+  // far larger than the handful of goals, so a valid thin cluster almost
+  // always turns up within a few tries; the best-so-far is kept as a
+  // fallback in the rare case none is perfect.
   _pickScatteredGoals(openCells, count) {
+    let best = null, bestEnclosed = Infinity;
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const goals = this._growGoalCluster(openCells, count);
+      if (goals.length < count) continue;
+      const enclosed = this._countEnclosedGoals(goals);
+      if (enclosed === 0) return goals;
+      if (enclosed < bestEnclosed) { bestEnclosed = enclosed; best = goals; }
+    }
+    return best || this._growGoalCluster(openCells, count);
+  }
+
+  // "Agent" strategy 2: N goals clustered together (adjacent via
+  // 4-connectivity) - but deliberately NOT a solid blob. Start from one goal
+  // and grow the cluster one 4-adjacent cell at a time, refusing any cell
+  // that would leave some goal (or the new cell itself) fully surrounded by
+  // other goals. Keeping every goal with at least one open non-goal
+  // neighbour means each is reachable from the open map around the cluster
+  // without ever crossing another goal - so the last racers can always fill
+  // even the innermost goal, instead of a filled-in blob's centre becoming
+  // physically unreachable once its neighbours are taken (which deadlocked
+  // the endgame).
+  _growGoalCluster(openCells, count) {
     const goals = [];
     const goalSet = new Set();
     const openSet = new Set(openCells.map(c => `${c.fx},${c.fy}`));
-
-    // Pick first goal randomly
     if (openCells.length === 0) return goals;
+
+    const nbrKeys = (x, y) => [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => `${x + dx},${y + dy}`);
+    // Would adding `cellKey` keep every affected goal (and cellKey itself)
+    // with at least one open, non-goal neighbour?
+    const keepsSideAccess = (cellKey) => {
+      const prospective = new Set(goalSet);
+      prospective.add(cellKey);
+      const hasFreeNbr = (k) => {
+        const [x, y] = k.split(',').map(Number);
+        return nbrKeys(x, y).some((nk) => openSet.has(nk) && !prospective.has(nk));
+      };
+      if (!hasFreeNbr(cellKey)) return false;
+      const [cx, cy] = cellKey.split(',').map(Number);
+      for (const nk of nbrKeys(cx, cy)) {
+        if (goalSet.has(nk) && !hasFreeNbr(nk)) return false;
+      }
+      return true;
+    };
+
     const first = openCells[Math.floor(Math.random() * openCells.length)];
     goals.push(first);
     goalSet.add(`${first.fx},${first.fy}`);
 
-    // For each additional goal, pick from neighbors of existing cluster
+    const goalNbrCount = (cellKey) => {
+      const [x, y] = cellKey.split(',').map(Number);
+      return nbrKeys(x, y).filter((nk) => goalSet.has(nk)).length;
+    };
+
     for (let i = 1; i < count; i++) {
-      const candidates = new Set();
-      // Collect all 4-adjacent cells to any goal in the cluster
+      const adjacent = new Set();
       for (const goal of goals) {
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const key = `${goal.fx + dx},${goal.fy + dy}`;
-          if (openSet.has(key) && !goalSet.has(key)) {
-            candidates.add(key);
-          }
+        for (const nk of nbrKeys(goal.fx, goal.fy)) {
+          if (openSet.has(nk) && !goalSet.has(nk)) adjacent.add(nk);
         }
       }
-
-      if (candidates.size === 0) {
-        // If no adjacent cells available, fall back to random from remaining open
-        for (const key of openSet) {
-          if (!goalSet.has(key)) candidates.add(key);
-        }
+      // Grow the cluster like a thin snake, not a solid blob: among the cells
+      // that keep every goal side-accessible, always pick one touching the
+      // FEWEST existing goals (a pure 1-neighbour extension of the tip, never
+      // filling in a concavity that would wall a cell in). This is what keeps
+      // the shape a line/branch - clustered ("挨在一起") but never enclosing.
+      let pool = [...adjacent].filter(keepsSideAccess);
+      if (!pool.length) pool = [...adjacent];
+      if (pool.length) {
+        const minTouch = Math.min(...pool.map(goalNbrCount));
+        pool = pool.filter((k) => goalNbrCount(k) === minTouch);
       }
+      if (!pool.length) {
+        for (const k of openSet) if (!goalSet.has(k)) pool.push(k);
+      }
+      if (!pool.length) break;
 
-      if (candidates.size === 0) break;
-
-      // Pick one randomly from candidates
-      const chosen = Array.from(candidates)[Math.floor(Math.random() * candidates.size)];
+      const chosen = pool[Math.floor(Math.random() * pool.length)];
       const [fx, fy] = chosen.split(',').map(Number);
-      const cell = { fx, fy };
-      goals.push(cell);
+      goals.push({ fx, fy });
       goalSet.add(chosen);
     }
 
@@ -1377,13 +1453,35 @@ export class Game {
   _agent2Sense(racer) {
     const { bx, by } = racer;
     this.agent2KnownOpen.add(`${bx},${by}`);
+    this._agent2RevealGoal(bx, by);
     for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const nx = bx + dx, ny = by + dy;
       const key = `${nx},${ny}`;
-      if (this.agent2KnownOpen.has(key) || this.agent2KnownWall.has(key)) continue;
-      if (this.blockGrid.blockOpen(nx, ny)) this.agent2KnownOpen.add(key);
-      else this.agent2KnownWall.add(key);
+      if (this.agent2KnownOpen.has(key)) { this._agent2RevealGoal(nx, ny); continue; }
+      if (this.agent2KnownWall.has(key)) continue;
+      if (this.blockGrid.blockOpen(nx, ny)) {
+        this.agent2KnownOpen.add(key);
+        // Seeing a goal from an adjacent cell is enough to "discover" it -
+        // it doesn't have to be physically stood on first. Without this, a
+        // goal enclosed in the middle of the cluster by racers already
+        // parked on the outer goals can never be reached to be discovered
+        // (routing needs it discovered-and-claimed to head for it), so the
+        // last few racers wander the far edges forever while the goals sit
+        // unclaimed right behind the ones already taken.
+        this._agent2RevealGoal(nx, ny);
+      } else {
+        this.agent2KnownWall.add(key);
+      }
     }
+  }
+
+  // Records a goal at (x,y) into the shared discovered list the first time
+  // anyone sees it, left unclaimed for whoever heads there to take. Cheap
+  // no-op for non-goal cells and for goals already on the list.
+  _agent2RevealGoal(x, y) {
+    if (!this._isMapGoal(x, y)) return;
+    if (this.agent2Discovered.some((g) => g.bx === x && g.by === y)) return;
+    this.agent2Discovered.push({ bx: x, by: y, claimedBy: null });
   }
 
   // Re-derives the "obvious dead ends" within the currently known map only -
@@ -1621,32 +1719,44 @@ export class Game {
     return this._chooseLocalYieldMove(racer, next);
   }
 
-  // Once claimed, route straight to the goal over the shared known map via
-  // A* - rather than replaying the discoverer's exact historical route
-  // verbatim, since goals now sit clustered right next to each other and
-  // that literal route can cut directly through a different goal cell.
-  // Ignores current occupancy (including reached racers) when planning, for
-  // the same reason as _buildAgent2ExplorePath: excluding every claimed
-  // cell in a tight, mostly-filled cluster can leave no route at all to
-  // whatever's left. _tryClearWayFor/_forceVacate resolves an occupied cell
-  // one step at a time while the route is actually being walked. Recomputed
-  // fresh whenever the current route runs out or gets invalidated, so it
-  // also naturally reroutes as the shared map keeps growing.
+  // Once claimed, route to the goal over the shared known map via A*.
+  //
+  // Preferred routing (tier 1) goes AROUND every other racer's already-taken
+  // goal cell, approaching this racer's own goal from a non-goal neighbour.
+  // That matters because goals cluster together: the plain shortest path to
+  // an inner goal usually slices straight through an outer goal a racer is
+  // already parked on, where it then jams forever. Since goal generation
+  // guarantees each goal keeps an open non-goal neighbour, a side route
+  // normally exists. Tier 2 (only if no side route is found) falls back to
+  // routing through occupied goals and letting _tryClearWayFor bump the
+  // parked racer aside - a last resort for the occasional layout where a
+  // goal really is only reachable across another.
   _buildAgent2TrailPath(racer) {
     if (!racer.claimedGoal) return null;
+    const goal = racer.claimedGoal;
     const knownOpen = (x, y) => this.agent2KnownOpen.has(`${x},${y}`);
-    // Same short-lived avoidance as _buildAgent2ExplorePath - don't let a
-    // just-bumped racer's replan immediately backtrack through the cell it
-    // was asked to vacate.
+    // A cell just vacated under a bump is closed off briefly so the replan
+    // doesn't instantly backtrack through it.
     const avoiding = (x, y) => racer.avoidSteps > 0 && racer.avoidCell &&
       x === racer.avoidCell.bx && y === racer.avoidCell.by;
-    const routeOpen = (x, y) => knownOpen(x, y) && !avoiding(x, y);
-    const path = findPath(routeOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: racer.claimedGoal.bx, fy: racer.claimedGoal.by });
+    // Another racer permanently sitting on its own reached goal - a fixed
+    // obstacle to route around (never this racer's own destination).
+    const otherReached = (x, y) => this.mapRacers.some((o) =>
+      o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
+
+    const from = { fx: racer.bx, fy: racer.by };
+    const to = { fx: goal.bx, fy: goal.by };
+    const around = (x, y) => knownOpen(x, y) && !avoiding(x, y) && !otherReached(x, y);
+    let path = findPath(around, this.blockGrid.blocksX, from, to);
+    if (path) return path;
+    // Tier 2: allow crossing occupied goals (bump resolves them).
+    const through = (x, y) => knownOpen(x, y) && !avoiding(x, y);
+    path = findPath(through, this.blockGrid.blocksX, from, to);
     if (path) return path;
     if (racer.avoidSteps > 0) {
       racer.avoidSteps = 0;
       racer.avoidCell = null;
-      return findPath(knownOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: racer.claimedGoal.bx, fy: racer.claimedGoal.by });
+      return findPath(knownOpen, this.blockGrid.blocksX, from, to);
     }
     return null;
   }
@@ -1676,8 +1786,63 @@ export class Game {
     return this._chooseLocalYieldMove(racer, next);
   }
 
+  // Global no-progress watchdog. The per-racer idle counter only catches a
+  // racer that's frozen; a jam more often shows up as racers *thrashing*
+  // (shuffling back and forth) so none of them is ever "idle" yet none
+  // reaches its goal either. This watches the swarm-wide reached count
+  // instead: if it hasn't risen for a long stretch, every still-unreached
+  // racer is kicked into a scatter at once, breaking whatever mutual
+  // configuration they were locked in so they can re-plan from fresh spots.
+  //
+  // Only armed once every goal has actually been discovered - before that,
+  // a flat reached count just means the swarm is still out exploring for the
+  // remaining goals (normal, not a jam), and scattering then would only
+  // scatter racers away from the search and wreck progress.
+  _agent2CheckStall() {
+    if (this.agent2Discovered.length < this.mapGoals.length) { this._agent2StallTicks = 0; return; }
+    const reached = this.mapRacers.reduce((n, r) => n + (r.status === 'reached' ? 1 : 0), 0);
+    if (reached !== this._agent2PrevReached) {
+      this._agent2PrevReached = reached;
+      this._agent2StallTicks = 0;
+      return;
+    }
+    if (reached === this.mapRacers.length) return; // done
+    this._agent2StallTicks = (this._agent2StallTicks || 0) + 1;
+    if (this._agent2StallTicks > 150) {
+      for (const r of this.mapRacers) {
+        if (r.status === 'solving') r.scatterSteps = Math.max(r.scatterSteps, 8);
+      }
+      this._agent2StallTicks = 0;
+    }
+  }
+
+  // Last-resort deadlock breaker. Two or more racers can wedge into a jam
+  // the normal yield/bump logic can't rotate out of - a claim cycle in a
+  // tight cluster, or a goal only reachable across occupied ones. When a
+  // racer has sat unable to move for a long stretch, it drops its claim and
+  // random-walks a handful of steps to physically shuffle the configuration;
+  // that almost always breaks the symmetry so everyone can re-plan and slot
+  // in. Rare and short, so it doesn't disturb normal smooth movement.
+  _chooseAgent2ScatterMove(racer) {
+    if (racer.claimedGoal) { racer.claimedGoal.claimedBy = null; racer.claimedGoal = null; }
+    racer.path = null;
+    this._updateMapPathDots(racer, null);
+    let candidates = Object.values(MAP_DIR_DELTAS)
+      .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
+      .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
+    if (!candidates.length) { racer.scatterSteps = 0; return null; }
+    // Avoid immediately reversing so the scatter actually travels somewhere.
+    const forward = candidates.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
+    if (forward.length) candidates = forward;
+    racer.scatterSteps -= 1;
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+
   _chooseAgent2Move(racer) {
     this._agent2Sense(racer);
+
+    if (racer.scatterSteps > 0) return this._chooseAgent2ScatterMove(racer);
+    if (racer.idleTicks > 45) { racer.scatterSteps = 6; racer.idleTicks = 0; return this._chooseAgent2ScatterMove(racer); }
 
     if (!racer.claimedGoal) {
       const claimable = this.agent2Discovered.filter((g) => g.claimedBy === null);
@@ -1885,6 +2050,7 @@ export class Game {
           racer.shadow.position.set(p.x, 0.02, p.z);
         }
       } else {
+        if (this.mapStrategy === 'agent2') this._agent2CheckStall();
         for (const racer of this.mapRacers) {
           if (!racer.shape.isBusy()) {
             if (racer.pendingDir) {
