@@ -994,6 +994,19 @@ export class Game {
     if (this._mapCellAvailable(next.fx, next.fy, racer)) return true;
     const blocker = this.mapRacers.find((other) => other !== racer && other.bx === next.fx && other.by === next.fy);
     if (!blocker) return false; // blocked by a wall, not a racer - nothing to clear
+
+    // Whoever is objectively closer to finishing its own current route wins
+    // the cell; the other waits or detours instead. Without this, two
+    // racers whose routes both genuinely need the same cell (a shared
+    // chokepoint) just keep evicting each other back and forth forever -
+    // racer A displaces B, B's own path says to come straight back so it
+    // does, immediately re-displacing A, on and on.
+    const racerRemaining = racer.path ? racer.path.length - racer.pathIndex : Infinity;
+    const blockerRemaining = blocker.path ? blocker.path.length - blocker.pathIndex : Infinity;
+    const racerHasPriority = racerRemaining < blockerRemaining ||
+      (racerRemaining === blockerRemaining && racer.id < blocker.id);
+    if (!racerHasPriority) return false;
+
     if (!this._forceVacate(blocker, new Set([racer.id]))) return false;
     return this._mapCellAvailable(next.fx, next.fy, racer);
   }
@@ -1035,15 +1048,38 @@ export class Game {
       .filter((cell) => this.blockGrid.blockOpen(cell.fx, cell.fy));
 
     const settle = (cell) => {
+      const oldCell = { bx: racer.bx, by: racer.by };
       racer.path = null;
       racer.pathIndex = 0;
       racer.blockedAttempts = 0;
       this._updateMapPathDots(racer, null);
-      if (canDisplaceReached) racer.status = 'solving';
+      if (canDisplaceReached) {
+        // It genuinely wants to go straight back to this exact cell (its
+        // own goal) - avoiding it would be counterproductive.
+        racer.status = 'solving';
+      } else {
+        // An ordinary bumped racer's very next A* replan will otherwise
+        // often find that the shortest route back to wherever it's headed
+        // cuts right back through the cell it just vacated, causing it to
+        // immediately step back - a visible yo-yo with whoever it made way
+        // for. Closing that one cell off for a few steps forces an actual
+        // detour instead.
+        racer.avoidCell = oldCell;
+        racer.avoidSteps = 3;
+      }
       this._applyMapMove(racer, cell);
     };
 
-    const free = neighbors.filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
+    let free = neighbors.filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
+    // Prefer anywhere other than the cell it just came from - that cell is
+    // often the only currently-free neighbour (it was just vacated), which
+    // otherwise sends the racer straight back where it started the moment
+    // someone else wants its new spot: a visible immediate bounce, not an
+    // actual detour.
+    if (racer.previousCell) {
+      const notPrevious = free.filter((cell) => cell.fx !== racer.previousCell.bx || cell.fy !== racer.previousCell.by);
+      if (notPrevious.length) free = notPrevious;
+    }
     if (free.length) {
       free.sort((a, b) => (isFrontier(b.fx, b.fy) ? 1 : 0) - (isFrontier(a.fx, a.fy) ? 1 : 0));
       settle(free[0]);
@@ -1460,18 +1496,51 @@ export class Game {
     // what actually resolves an occupied cell, one step at a time, as the
     // route is walked.
     const alive = this._agent2ComputeKnownPruned();
-    const frontiers = this._agent2Frontiers(alive);
-    if (!frontiers.length) return null;
+    // A cell this racer was just bumped out of (see _forceVacate) is
+    // temporarily closed off too, so a fresh replan doesn't immediately
+    // route straight back through it - otherwise being asked to make way
+    // and then instantly snapping back is exactly the kind of visible
+    // twitch this is meant to prevent.
+    const avoiding = (x, y) => racer.avoidSteps > 0 && racer.avoidCell &&
+      x === racer.avoidCell.bx && y === racer.avoidCell.by;
+    const routeOpen = (x, y) => alive(x, y) && !avoiding(x, y);
 
-    // The single best-scored frontier (usually whichever is nearest the
-    // known goal cluster) might occasionally still fail to produce a path
-    // (e.g. genuinely disconnected within the currently-known map) - fall
-    // through to the next best candidate instead of giving up on exploring
-    // altogether.
-    for (const target of this._chooseAgent2ExploreTargets(racer, frontiers).slice(0, 8)) {
-      if (racer.bx === target.fx && racer.by === target.fy) return [{ fx: racer.bx, fy: racer.by }];
-      const path = findPath(alive, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, target);
-      if (path) return path;
+    const buildFrom = (isOpen) => {
+      let frontiers = this._agent2Frontiers(isOpen);
+      if (!frontiers.length) return null;
+      // The cell a racer just came from is often still technically a valid
+      // frontier (it can easily border its own bit of unsensed territory on
+      // another side), which without this makes a one-step "walk forward,
+      // immediately walk right back" the literal highest-scoring plan the
+      // moment the short path there completes - a plain reversal is
+      // indistinguishable from actual progress by cell count alone. Only
+      // exclude it when a genuine alternative exists.
+      if (racer.previousCell) {
+        const notPrevious = frontiers.filter((f) => f.fx !== racer.previousCell.bx || f.fy !== racer.previousCell.by);
+        if (notPrevious.length) frontiers = notPrevious;
+      }
+      // The single best-scored frontier (usually whichever is nearest the
+      // known goal cluster) might occasionally still fail to produce a path
+      // (e.g. genuinely disconnected within the currently-known map) - fall
+      // through to the next best candidate instead of giving up on
+      // exploring altogether.
+      for (const target of this._chooseAgent2ExploreTargets(racer, frontiers).slice(0, 8)) {
+        if (racer.bx === target.fx && racer.by === target.fy) return [{ fx: racer.bx, fy: racer.by }];
+        const path = findPath(isOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, target);
+        if (path) return path;
+      }
+      return null;
+    };
+
+    const path = buildFrom(routeOpen);
+    if (path) return path;
+    if (racer.avoidSteps > 0) {
+      // Nowhere to go without crossing the avoided cell - it wasn't a real
+      // detour opportunity after all, so drop the restriction rather than
+      // stall exploration entirely.
+      racer.avoidSteps = 0;
+      racer.avoidCell = null;
+      return buildFrom(alive);
     }
     return null;
   }
@@ -1480,10 +1549,15 @@ export class Game {
   // very first tick, or the known map has momentarily no reachable
   // frontier) - a single least-visited step so the racer isn't stuck idle.
   _chooseAgent2FallbackMove(racer) {
-    const candidates = Object.values(MAP_DIR_DELTAS)
+    let candidates = Object.values(MAP_DIR_DELTAS)
       .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
       .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
     if (!candidates.length) return null;
+
+    if (racer.avoidSteps > 0 && racer.avoidCell) {
+      const notAvoided = candidates.filter((cell) => cell.fx !== racer.avoidCell.bx || cell.fy !== racer.avoidCell.by);
+      if (notAvoided.length) candidates = notAvoided;
+    }
 
     candidates.sort((a, b) => {
       const visitsA = this.agent2SharedVisits.get(`${a.fx},${a.fy}`) || 0;
@@ -1491,6 +1565,10 @@ export class Game {
       if (visitsA !== visitsB) return visitsA - visitsB;
       return Math.random() - 0.5;
     });
+    if (racer.avoidSteps > 0) {
+      racer.avoidSteps -= 1;
+      if (!racer.avoidSteps) racer.avoidCell = null;
+    }
     return candidates[0];
   }
 
@@ -1520,6 +1598,10 @@ export class Game {
     const next = racer.path[racer.pathIndex + 1];
     if (this._tryClearWayFor(racer, next)) {
       racer.blockedAttempts = 0;
+      if (racer.avoidSteps > 0) {
+        racer.avoidSteps -= 1;
+        if (!racer.avoidSteps) racer.avoidCell = null;
+      }
       racer.pathIndex += 1;
       return next;
     }
@@ -1543,7 +1625,20 @@ export class Game {
   _buildAgent2TrailPath(racer) {
     if (!racer.claimedGoal) return null;
     const knownOpen = (x, y) => this.agent2KnownOpen.has(`${x},${y}`);
-    return findPath(knownOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: racer.claimedGoal.bx, fy: racer.claimedGoal.by });
+    // Same short-lived avoidance as _buildAgent2ExplorePath - don't let a
+    // just-bumped racer's replan immediately backtrack through the cell it
+    // was asked to vacate.
+    const avoiding = (x, y) => racer.avoidSteps > 0 && racer.avoidCell &&
+      x === racer.avoidCell.bx && y === racer.avoidCell.by;
+    const routeOpen = (x, y) => knownOpen(x, y) && !avoiding(x, y);
+    const path = findPath(routeOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: racer.claimedGoal.bx, fy: racer.claimedGoal.by });
+    if (path) return path;
+    if (racer.avoidSteps > 0) {
+      racer.avoidSteps = 0;
+      racer.avoidCell = null;
+      return findPath(knownOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: racer.claimedGoal.bx, fy: racer.claimedGoal.by });
+    }
+    return null;
   }
 
   _chooseAgent2TrailMove(racer) {
@@ -1557,6 +1652,10 @@ export class Game {
     const next = racer.path[racer.pathIndex + 1];
     if (this._tryClearWayFor(racer, next)) {
       racer.blockedAttempts = 0;
+      if (racer.avoidSteps > 0) {
+        racer.avoidSteps -= 1;
+        if (!racer.avoidSteps) racer.avoidCell = null;
+      }
       racer.pathIndex += 1;
       this._updateMapPathDots(racer, racer.path.slice(racer.pathIndex));
       return next;
