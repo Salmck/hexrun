@@ -707,6 +707,15 @@ export class Game {
       starts.push({ fx: best.fx, fy: best.fy });
     }
 
+    // Agent mode 2: shared exploration state. agent2Visited is the one common
+    // record of every cell any racer has stood on (so the swarm avoids
+    // retracing ground the group has already covered - "尽量不走回头路"), and
+    // agent2Sensed is the one shared field of view (every ±1 sense any racer
+    // makes is added here, so vision is pooled - "视野共享").
+    if (isAgent2) {
+      this.agent2Visited = new Set(starts.map((s) => `${s.fx},${s.fy}`));
+      this.agent2Sensed = new Set();
+    }
 
     const cellSize = this.forwardStep;
     const blockStep = MAZE_RATIO * cellSize; // world distance between adjacent block centers
@@ -888,6 +897,20 @@ export class Game {
     racer.shape.startMove(dir);
     racer.pendingDir = dir;
 
+    if (this.mapStrategy === 'agent2') {
+      // Mark the arrived cell as covered ground in the shared record and sense
+      // from the new spot (both shared). If it's a goal, the racer has found
+      // one - it stops right there.
+      this.agent2Visited.add(`${racer.bx},${racer.by}`);
+      this._agent2Sense(racer);
+      if (this._isMapGoal(racer.bx, racer.by)) {
+        racer.status = 'reached';
+        const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);
+        if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(RACER_COLORS[racer.id % RACER_COLORS.length]);
+      }
+      return;
+    }
+
     if (racer.bx === racer.assignedGoal.bx && racer.by === racer.assignedGoal.by) {
       racer.status = 'reached';
       this._updateMapPathDots(racer, null);
@@ -907,6 +930,11 @@ export class Game {
 
   _mapCellAvailable(x, y, racer) {
     if (!this.blockGrid.blockOpen(x, y)) return false;
+    if (this.mapStrategy === 'agent2') {
+      // Any cell another racer stands on is taken - including one that has
+      // stopped on a goal, which is a permanent obstacle to everyone else.
+      return !this.mapRacers.some((other) => other !== racer && other.bx === x && other.by === y);
+    }
     if (this._isMapGoal(x, y)) return true;
     // Only an exact-same-cell occupancy counts as a collision - racers may
     // freely stand right next to each other, they just can't both be on the
@@ -1331,14 +1359,91 @@ export class Game {
     return goals;
   }
 
-  // Agent mode 2 movement AI. The old pathfinding / sensing / avoidance logic
-  // has been removed - the scene (racers, walls, goals) is still generated and
-  // drawn, but nothing decides where a racer goes, so they stay put. Rebuild
-  // the decision logic here. One returned move steps a racer exactly one big
-  // cell (= 4 tumbles / MAZE_RATIO small cells); returning null means "don't
-  // move this racer this round".
+  // Adds the racer's own cell and its four neighbours to the one shared field
+  // of view. Vision is pooled, so what any racer sees, every racer "knows".
+  _agent2Sense(racer) {
+    this.agent2Sensed.add(`${racer.bx},${racer.by}`);
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      this.agent2Sensed.add(`${racer.bx + dx},${racer.by + dy}`);
+    }
+  }
+
+  // Agent mode 2 movement AI: each racer explores on its own, one big cell per
+  // step (= 4 tumbles). It prefers ground the swarm hasn't walked yet (the
+  // visited record is shared, so nobody retraces anyone's path - "尽量不走回头
+  //路"), and among those pushes toward the least-seen direction (the field of
+  // view is shared too). Landing on a goal stops the racer - handled in
+  // _applyMapMove. Returns null when it is boxed in this round.
   _chooseAgent2Move(racer) {
-    return null;
+    this._agent2Sense(racer);
+
+    // Open, unoccupied neighbouring cells it could step onto.
+    let pool = Object.values(MAP_DIR_DELTAS)
+      .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
+      .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
+    if (!pool.length) return null;
+
+    // Found one: if a goal is right next to it, step straight onto it and stop
+    // there. (Otherwise the preferences below could walk it right past a goal
+    // that sits in already-explored ground.)
+    const goalCell = pool.find((cell) => this._isMapGoal(cell.fx, cell.fy));
+    if (goalCell) return goalCell;
+
+    const notBack = (cells) => {
+      if (!racer.previousCell) return cells;
+      const f = cells.filter((c) => c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
+      return f.length ? f : cells;
+    };
+
+    // Vision is shared, so a racer counts as knowing about any goal ANY racer
+    // has sensed. Once a still-free one is known, this racer stops wandering
+    // and finds its OWN way there: a shortest route over the shared field of
+    // view (cells anyone has sensed to be open, routed around goals other
+    // racers have stopped on). It heads for whichever known free goal is
+    // actually reachable and nearest by that route. This routing over real
+    // sensed geometry - not a straight-line guess - is what stops racers
+    // getting wedged against a wall between them and a goal.
+    const knownFreeGoals = this.mapGoals
+      .filter((g) => this.agent2Sensed.has(`${g.bx},${g.by}`) &&
+        !this.mapRacers.some((o) => o !== racer && o.bx === g.bx && o.by === g.by))
+      .sort((a, b) => (Math.abs(a.bx - racer.bx) + Math.abs(a.by - racer.by)) -
+        (Math.abs(b.bx - racer.bx) + Math.abs(b.by - racer.by)));
+    if (knownFreeGoals.length) {
+      const sensedOpen = (x, y) => this.agent2Sensed.has(`${x},${y}`) && this.blockGrid.blockOpen(x, y) &&
+        !this.mapRacers.some((o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
+      const from = { fx: racer.bx, fy: racer.by };
+      for (const g of knownFreeGoals) {
+        const route = findPath(sensedOpen, this.blockGrid.blocksX, from, { fx: g.bx, fy: g.by });
+        if (route && route.length >= 2) {
+          const next = route[1];
+          if (this._mapCellAvailable(next.fx, next.fy, racer)) return next;
+          // Next cell momentarily taken by a passing racer. Don't just wait
+          // (with no yielding logic, two racers waiting on each other would
+          // deadlock) - fall through to an exploration step so the racer keeps
+          // moving and the jam clears; it re-routes to the goal next round.
+          break;
+        }
+      }
+      // A goal is known but no sensed route reaches it yet (or the route's next
+      // cell is blocked) - fall through and take an exploration step.
+    }
+
+    // No goal in view yet: explore. Prefer ground nobody has stood on (visited
+    // is shared - "尽量不走回头路"); only step back onto covered ground when
+    // there's no fresh cell, so it can leave a dead end.
+    const fresh = pool.filter((cell) => !this.agent2Visited.has(`${cell.fx},${cell.fy}`));
+    if (fresh.length) pool = fresh;
+    pool = notBack(pool);
+
+    // Among those, push toward the least-seen direction: the cell bordering the
+    // most not-yet-sensed neighbours, so the shared map keeps growing outward.
+    // Random tie-break so racers fan out instead of all turning the same way.
+    const unseenAround = (cell) => [[1, 0], [-1, 0], [0, 1], [0, -1]]
+      .filter(([dx, dy]) => !this.agent2Sensed.has(`${cell.fx + dx},${cell.fy + dy}`)).length;
+    const most = Math.max(...pool.map(unseenAround));
+    pool = pool.filter((cell) => unseenAround(cell) === most);
+
+    return pool[Math.floor(Math.random() * pool.length)];
   }
 
   // ---------------------------------------------------------------------
