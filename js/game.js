@@ -1411,6 +1411,15 @@ export class Game {
       };
       const route = findPath(sensedOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
       if (route && route.length >= 2) {
+        // Publish how far this racer still has to go so _tryClearWayFor's
+        // yield is decided by PROGRESS, not id: a moving racer in the way that
+        // is farther from its own goal (or just exploring, path === null)
+        // steps aside for one closer to finishing. This is what keeps a moving
+        // object from ever holding up the A* line - the route itself already
+        // ignores moving racers entirely; only the single shared next cell is
+        // arbitrated, and it's arbitrated in the A* follower's favour.
+        racer.path = route;
+        racer.pathIndex = 0;
         // We have a route to a goal - draw the line and keep it up steadily,
         // even on a round the racer can't actually advance (so it doesn't
         // blink off every time it's momentarily blocked).
@@ -1421,15 +1430,17 @@ export class Game {
         // between, which frees this cell for the arriver.
         const parked = this.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === next.fx && o.by === next.fy);
         if (parked) this._agent2ChainYield(parked);
-        // Minimal yielding for still-moving racers in the way (one cell aside).
         if (this._tryClearWayFor(racer, next)) return next;
-        // Next cell held by a higher-priority racer this round - WAIT (line
-        // stays up) rather than wandering off; it advances once the way clears.
+        // Only a racer even closer to its own goal holds the cell this round -
+        // WAIT (line stays up) rather than wandering off; advances once clear.
         return null;
       }
       // Target not reachable over sensed ground yet - keep exploring to open it
       // up (no route, so no line to show).
     }
+    // Not heading to a goal this round - drop any stale route so it counts as
+    // lowest priority and yields to racers that ARE following one.
+    racer.path = null;
     this._updateMapPathDots(racer, null);
 
     return this._agent2ExploreStep(racer, pool);
