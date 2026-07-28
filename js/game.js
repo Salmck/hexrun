@@ -1389,51 +1389,18 @@ export class Game {
     const goalCell = pool.find((cell) => this._isMapGoal(cell.fx, cell.fy));
     if (goalCell) return goalCell;
 
-    const notBack = (cells) => {
-      if (!racer.previousCell) return cells;
-      const f = cells.filter((c) => c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
-      return f.length ? f : cells;
-    };
-
-    // Vision is shared, so a racer counts as knowing about any goal ANY racer
-    // has sensed. Once a still-free one is known, this racer stops wandering
-    // and finds its OWN way there: a shortest route over the shared field of
-    // view (cells anyone has sensed to be open, routed around goals other
-    // racers have stopped on). It heads for whichever known free goal is
-    // actually reachable and nearest by that route. This routing over real
-    // sensed geometry - not a straight-line guess - is what stops racers
-    // getting wedged against a wall between them and a goal.
-    const knownFreeGoals = this.mapGoals
-      .filter((g) => this.agent2Sensed.has(`${g.bx},${g.by}`) &&
-        !this.mapRacers.some((o) => o !== racer && o.bx === g.bx && o.by === g.by))
-      .sort((a, b) => (Math.abs(a.bx - racer.bx) + Math.abs(a.by - racer.by)) -
-        (Math.abs(b.bx - racer.bx) + Math.abs(b.by - racer.by)));
-    if (knownFreeGoals.length) {
-      const sensedOpen = (x, y) => this.agent2Sensed.has(`${x},${y}`) && this.blockGrid.blockOpen(x, y) &&
-        !this.mapRacers.some((o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
-      const from = { fx: racer.bx, fy: racer.by };
-      for (const g of knownFreeGoals) {
-        const route = findPath(sensedOpen, this.blockGrid.blocksX, from, { fx: g.bx, fy: g.by });
-        if (route && route.length >= 2) {
-          const next = route[1];
-          if (this._mapCellAvailable(next.fx, next.fy, racer)) return next;
-          // Next cell momentarily taken by a passing racer. Don't just wait
-          // (with no yielding logic, two racers waiting on each other would
-          // deadlock) - fall through to an exploration step so the racer keeps
-          // moving and the jam clears; it re-routes to the goal next round.
-          break;
-        }
-      }
-      // A goal is known but no sensed route reaches it yet (or the route's next
-      // cell is blocked) - fall through and take an exploration step.
-    }
-
-    // No goal in view yet: explore. Prefer ground nobody has stood on (visited
-    // is shared - "尽量不走回头路"); only step back onto covered ground when
-    // there's no fresh cell, so it can leave a dead end.
+    // Explore. Prefer ground nobody has stood on (visited is shared - "尽量不
+    // 走回头路"); only step back onto covered ground when there's no fresh cell,
+    // so it can leave a dead end.
     const fresh = pool.filter((cell) => !this.agent2Visited.has(`${cell.fx},${cell.fy}`));
     if (fresh.length) pool = fresh;
-    pool = notBack(pool);
+
+    // Don't immediately double back to the cell it just came from unless that
+    // is the only way on.
+    if (racer.previousCell) {
+      const notBack = pool.filter((cell) => cell.fx !== racer.previousCell.bx || cell.fy !== racer.previousCell.by);
+      if (notBack.length) pool = notBack;
+    }
 
     // Among those, push toward the least-seen direction: the cell bordering the
     // most not-yet-sensed neighbours, so the shared map keeps growing outward.
