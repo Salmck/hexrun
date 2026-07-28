@@ -1080,7 +1080,13 @@ export class Game {
         // another was rigidly waiting for, with no one able to rotate.
         // Freeing the claim lets the cluster resolve as "nearest free racer
         // takes nearest free goal" instead.
-        if (racer.claimedGoal) racer.claimedGoal.claimedBy = null;
+        if (racer.claimedGoal) {
+          // Its goal is unclaimed again - drop the marker back to neutral so
+          // it doesn't keep showing this racer's colour while nobody owns it.
+          const gi = this.mapGoals.findIndex((g) => g.bx === racer.claimedGoal.bx && g.by === racer.claimedGoal.by);
+          if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+          racer.claimedGoal.claimedBy = null;
+        }
         racer.claimedGoal = null;
         racer.status = 'solving';
       } else {
@@ -1583,7 +1589,10 @@ export class Game {
         ? Math.min(...this.agent2Discovered.map((g) => Math.abs(f.fx - g.bx) + Math.abs(f.fy - g.by)))
         : 0;
       const visits = this.agent2SharedVisits.get(`${f.fx},${f.fy}`) || 0;
-      const score = (hasGoalHint ? distToGoal * 3 : 0) + distToMe + visits * 0.5;
+      // visits weighs heavily so the swarm actively shuns ground it (or anyone
+      // else, via the shared count) has already covered and keeps pushing into
+      // genuinely new territory - "尽量不走走过的路".
+      const score = (hasGoalHint ? distToGoal * 3 : 0) + distToMe + visits * 2;
       return { f, score };
     });
     scored.sort((a, b) => a.score !== b.score ? a.score - b.score : Math.random() - 0.5);
@@ -1838,6 +1847,60 @@ export class Game {
     return candidates[Math.floor(Math.random() * candidates.length)];
   }
 
+  // Endgame goal handoff ("让位"). A racer beelining to its own claimed but
+  // still-free goal G often passes right next to a NEARER goal N that another
+  // racer has already settled on. Routing the newcomer the long way around a
+  // tight cluster to reach G is exactly what jams the endgame, so instead the
+  // parked racer gives up N and inherits G: the newcomer takes the closest
+  // goal, the incumbent relocates outward to the one just vacated.
+  //
+  // This is a pure 1-for-1 swap and cannot starve or cascade: G is guaranteed
+  // free (this racer was the sole claimant), so the displaced racer always has
+  // a definite home, and the count of unclaimed goals is unchanged. It only
+  // fires when the newcomer is genuinely "即将到达" (N within HANDOFF_RANGE)
+  // and N is strictly closer than G, keeping it a small local shuffle rather
+  // than a global reshuffle recomputed every tick. The actual physical
+  // stepping-aside is still handled by the existing _forceVacate BFS cascade
+  // as the newcomer arrives - here we only reassign who owns which goal.
+  _agent2TryGoalHandoff(racer) {
+    const HANDOFF_RANGE = 4;
+    const G = racer.claimedGoal;
+    if (!G) return;
+    const dToG = Math.abs(G.bx - racer.bx) + Math.abs(G.by - racer.by);
+    let best = null;
+    let bestD = Infinity;
+    for (const N of this.agent2Discovered) {
+      if (N === G || N.claimedBy === null || N.claimedBy === racer.id) continue;
+      // The claimant must actually be parked on N right now - a racer merely
+      // heading toward N (not yet arrived) isn't blocking it, so there's
+      // nothing to hand over.
+      const occupant = this.mapRacers.find((o) => o.id === N.claimedBy && o.status === 'reached');
+      if (!occupant || occupant.bx !== N.bx || occupant.by !== N.by) continue;
+      const dToN = Math.abs(N.bx - racer.bx) + Math.abs(N.by - racer.by);
+      if (dToN >= dToG || dToN > HANDOFF_RANGE) continue; // no gain, or not close enough yet
+      if (dToN < bestD) { bestD = dToN; best = { N, occupant }; }
+    }
+    if (!best) return;
+
+    const { N, occupant } = best;
+    // Newcomer takes the near goal; free the far one for the incumbent.
+    G.claimedBy = null;
+    N.claimedBy = racer.id;
+    racer.claimedGoal = N;
+    racer.path = null;
+    this._updateMapPathDots(racer, null);
+    // The incumbent becomes a free solver again; next tick it re-claims the
+    // nearest unclaimed goal (G, just vacated, is normally it). Reset N's
+    // marker to neutral until whoever ends up there actually arrives.
+    occupant.status = 'solving';
+    occupant.claimedGoal = null;
+    occupant.path = null;
+    occupant.previousCell = null;
+    this._updateMapPathDots(occupant, null);
+    const gi = this.mapGoals.findIndex((g) => g.bx === N.bx && g.by === N.by);
+    if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+  }
+
   _chooseAgent2Move(racer) {
     this._agent2Sense(racer);
 
@@ -1862,6 +1925,10 @@ export class Game {
     }
 
     if (racer.claimedGoal) {
+      // Endgame "让位": if a nearer goal a parked racer is sitting on is worth
+      // taking, swap onto it and send that racer to this one's (now free) goal
+      // instead of routing the long way around the cluster.
+      this._agent2TryGoalHandoff(racer);
       const move = this._chooseAgent2TrailMove(racer);
       if (move) return move;
       // No known route to the claimed goal yet - keep exploring (which also
