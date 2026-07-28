@@ -1762,15 +1762,46 @@ export class Game {
     const through = (x, y) => knownOpen(x, y) && !avoiding(x, y);
     path = findPath(through, this.blockGrid.blocksX, from, to);
     if (path) return path;
+
+    // Tiers 1-2 route only over cells actually sensed to be open. Until the
+    // corridor to the goal has been explored end to end they usually find
+    // nothing, which is what made the A* line flicker on and off and drop the
+    // racer back into blind wandering. Once the goal's LOCATION is known,
+    // though, a racer can commit to it: route OPTIMISTICALLY straight for it,
+    // treating not-yet-sensed cells as passable and avoiding only cells
+    // already sensed to be walls. Every step first senses the four
+    // neighbours, so the immediate next cell is always genuinely open; a
+    // wrong guess further along is simply re-planned the moment its wall is
+    // sensed. The result is a steady beeline (and a steady dotted line) that
+    // self-corrects as the real walls are revealed, instead of reverting to
+    // aimless search whenever the fully-known route momentarily breaks.
+    const bg = this.blockGrid;
+    const notWall = (x, y) => x >= 0 && x < bg.blocksX && y >= 0 && y < bg.blocksY &&
+      !this.agent2KnownWall.has(`${x},${y}`);
+    const optimisticAround = (x, y) => notWall(x, y) && !avoiding(x, y) && !otherReached(x, y);
+    path = findPath(optimisticAround, bg.blocksX, from, to);
+    if (path) return path;
+    const optimisticThrough = (x, y) => notWall(x, y) && !avoiding(x, y);
+    path = findPath(optimisticThrough, bg.blocksX, from, to);
+    if (path) return path;
     if (racer.avoidSteps > 0) {
       racer.avoidSteps = 0;
       racer.avoidCell = null;
-      return findPath(knownOpen, this.blockGrid.blocksX, from, to);
+      return findPath((x, y) => notWall(x, y), bg.blocksX, from, to);
     }
     return null;
   }
 
   _chooseAgent2TrailMove(racer) {
+    // An optimistic route (see _buildAgent2TrailPath) can plan through cells
+    // that hadn't been sensed yet; the moment sensing turns the next planned
+    // cell into a known wall, tear the route up and re-plan around it now
+    // rather than waiting out the blocked-attempt counter as if a racer were
+    // in the way.
+    if (racer.path && racer.pathIndex + 1 < racer.path.length) {
+      const step = racer.path[racer.pathIndex + 1];
+      if (this.agent2KnownWall.has(`${step.fx},${step.fy}`)) { racer.path = null; }
+    }
     if (!racer.path || racer.pathIndex >= racer.path.length - 1) {
       racer.path = this._buildAgent2TrailPath(racer);
       racer.pathIndex = 0;
