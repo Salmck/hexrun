@@ -905,6 +905,7 @@ export class Game {
       this._agent2Sense(racer);
       if (this._isMapGoal(racer.bx, racer.by)) {
         racer.status = 'reached';
+        this._updateMapPathDots(racer, null); // stopped - clear its A* line
         const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);
         if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(RACER_COLORS[racer.id % RACER_COLORS.length]);
       }
@@ -1135,7 +1136,7 @@ export class Game {
 
   _updateMapPathDots(racer, path) {
     if (!racer.pathDots) return;
-    const showsDots = this.mapStrategy === 'path' || this.mapStrategy === 'agent';
+    const showsDots = this.mapStrategy === 'path' || this.mapStrategy === 'agent' || this.mapStrategy === 'agent2';
     if (!showsDots || !path || path.length < 2) {
       racer.pathDots.count = 0;
       racer.pathGlow.count = 0;
@@ -1368,43 +1369,82 @@ export class Game {
     }
   }
 
-  // Agent mode 2 movement AI: each racer explores on its own, one big cell per
-  // step (= 4 tumbles). It prefers ground the swarm hasn't walked yet (the
-  // visited record is shared, so nobody retraces anyone's path - "尽量不走回头
-  //路"), and among those pushes toward the least-seen direction (the field of
-  // view is shared too). Landing on a goal stops the racer - handled in
-  // _applyMapMove. Returns null when it is boxed in this round.
+  // Agent mode 2 movement AI. Each racer moves one big cell (= 4 tumbles) per
+  // step. It explores blindly until a goal turns up in the SHARED field of
+  // view; once one has, it takes its own nearest still-free goal and A*-routes
+  // there over the shared sensed map, drawing the line. Landing on a goal
+  // stops it (handled in _applyMapMove). Returns null when boxed in.
   _chooseAgent2Move(racer) {
     this._agent2Sense(racer);
 
     // Open, unoccupied neighbouring cells it could step onto.
-    let pool = Object.values(MAP_DIR_DELTAS)
+    const pool = Object.values(MAP_DIR_DELTAS)
       .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
       .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
     if (!pool.length) return null;
 
-    // Found one: if a goal is right next to it, step straight onto it and stop
-    // there. (Otherwise the preferences below could walk it right past a goal
-    // that sits in already-explored ground.)
-    const goalCell = pool.find((cell) => this._isMapGoal(cell.fx, cell.fy));
-    if (goalCell) return goalCell;
+    // Right next to a goal? Step straight onto it and stop there.
+    const adjGoal = pool.find((cell) => this._isMapGoal(cell.fx, cell.fy));
+    if (adjGoal) return adjGoal;
 
-    // Explore. Prefer ground nobody has stood on (visited is shared - "尽量不
-    // 走回头路"); only step back onto covered ground when there's no fresh cell,
-    // so it can leave a dead end.
+    // Goal assignment (one goal per racer). Vision is shared, so a goal counts
+    // as KNOWN the moment any racer has sensed it. A known goal is "taken" if
+    // someone has stopped on it or already claimed it. This racer keeps its
+    // own nearest still-free known goal - re-picking if the one it held got
+    // taken - so racers spread across the cluster instead of all funnelling
+    // onto the same nearest goal.
+    const taken = (g) => this.mapRacers.some((o) => o !== racer &&
+      ((o.status === 'reached' && o.bx === g.bx && o.by === g.by) ||
+       (o.claimedGoal && o.claimedGoal.bx === g.bx && o.claimedGoal.by === g.by)));
+    if (racer.claimedGoal && taken(racer.claimedGoal)) racer.claimedGoal = null;
+    if (!racer.claimedGoal) {
+      const free = this.mapGoals
+        .filter((g) => this.agent2Sensed.has(`${g.bx},${g.by}`) && !taken(g))
+        .sort((a, b) => (Math.abs(a.bx - racer.bx) + Math.abs(a.by - racer.by)) -
+          (Math.abs(b.bx - racer.bx) + Math.abs(b.by - racer.by)));
+      if (free.length) racer.claimedGoal = free[0];
+    }
+
+    // Have a goal: A* to it over the shared sensed-open map, routing around any
+    // racer already stopped on a goal.
+    if (racer.claimedGoal) {
+      const g = racer.claimedGoal;
+      const sensedOpen = (x, y) => this.agent2Sensed.has(`${x},${y}`) && this.blockGrid.blockOpen(x, y) &&
+        !this.mapRacers.some((o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
+      const route = findPath(sensedOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: g.bx, fy: g.by });
+      if (route && route.length >= 2) {
+        const next = route[1];
+        // Minimal yielding: if the next cell is free, or the racer sitting on
+        // it can be asked to step one cell aside, take it. Without this a
+        // blocked racer would fall back to exploring AWAY from its goal and
+        // never converge; _tryClearWayFor only shuffles still-moving racers by
+        // one cell (routes already go around racers stopped on goals).
+        if (this._tryClearWayFor(racer, next)) {
+          this._updateMapPathDots(racer, route);
+          return next;
+        }
+        // Couldn't clear it this round - take an exploration step and re-route
+        // next round rather than freezing.
+      }
+      // Goal known but no sensed route reaches it yet - explore to open one up.
+    }
+    this._updateMapPathDots(racer, null);
+
+    return this._agent2ExploreStep(racer, pool);
+  }
+
+  // One blind-exploration step: prefer ground nobody has stood on (shared
+  // visited - "尽量不走回头路"), don't immediately double back, and head toward
+  // the least-seen direction so the shared map keeps growing outward.
+  _agent2ExploreStep(racer, pool) {
     const fresh = pool.filter((cell) => !this.agent2Visited.has(`${cell.fx},${cell.fy}`));
     if (fresh.length) pool = fresh;
 
-    // Don't immediately double back to the cell it just came from unless that
-    // is the only way on.
     if (racer.previousCell) {
       const notBack = pool.filter((cell) => cell.fx !== racer.previousCell.bx || cell.fy !== racer.previousCell.by);
       if (notBack.length) pool = notBack;
     }
 
-    // Among those, push toward the least-seen direction: the cell bordering the
-    // most not-yet-sensed neighbours, so the shared map keeps growing outward.
-    // Random tie-break so racers fan out instead of all turning the same way.
     const unseenAround = (cell) => [[1, 0], [-1, 0], [0, 1], [0, -1]]
       .filter(([dx, dy]) => !this.agent2Sensed.has(`${cell.fx + dx},${cell.fy + dy}`)).length;
     const most = Math.max(...pool.map(unseenAround));
