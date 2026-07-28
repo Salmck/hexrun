@@ -1411,6 +1411,10 @@ export class Game {
       };
       const route = findPath(sensedOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
       if (route && route.length >= 2) {
+        // We have a route to a goal - draw the line and keep it up steadily,
+        // even on a round the racer can't actually advance (so it doesn't
+        // blink off every time it's momentarily blocked).
+        this._updateMapPathDots(racer, route);
         const next = route[1];
         // Almost there and the goal is taken? BFS chain-yield: the racer parked
         // on it slides one goal along to the nearest empty goal, pushing any in
@@ -1418,14 +1422,13 @@ export class Game {
         const parked = this.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === next.fx && o.by === next.fy);
         if (parked) this._agent2ChainYield(parked);
         // Minimal yielding for still-moving racers in the way (one cell aside).
-        if (this._tryClearWayFor(racer, next)) {
-          this._updateMapPathDots(racer, route);
-          return next;
-        }
-        // Blocked this round - fall through to an exploration step and re-route
-        // next round rather than freezing.
+        if (this._tryClearWayFor(racer, next)) return next;
+        // Next cell held by a higher-priority racer this round - WAIT (line
+        // stays up) rather than wandering off; it advances once the way clears.
+        return null;
       }
-      // Target not reachable over sensed ground yet - explore to open it up.
+      // Target not reachable over sensed ground yet - keep exploring to open it
+      // up (no route, so no line to show).
     }
     this._updateMapPathDots(racer, null);
 
