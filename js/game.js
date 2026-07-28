@@ -1048,7 +1048,14 @@ export class Game {
     // Already mid-animation from its own turn earlier this same tick -
     // racer.bx/by is already updated for that move, so moving it again now
     // would double-move it within one tick and restart its animation.
-    if (racer.shape.isBusy() || depth > 6 || visited.has(racer.id)) return false;
+    //
+    // pendingDir means the racer has completed only the FIRST of the two
+    // tumbles that make up one logical cell-move and is momentarily idle
+    // waiting for the main loop to fire the second. It looks free (isBusy is
+    // false) but it is really mid-move: calling _applyMapMove on it now would
+    // overwrite that queued second tumble, so it would travel only half a
+    // cell and come to rest stranded between two cells. Treat it as busy.
+    if (racer.shape.isBusy() || racer.pendingDir || depth > 6 || visited.has(racer.id)) return false;
     const canDisplaceReached = this.mapStrategy === 'agent2' && racer.status === 'reached' && depth === 0;
     if (racer.status !== 'solving' && !canDisplaceReached) return false;
     visited.add(racer.id);
