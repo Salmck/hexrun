@@ -1383,54 +1383,108 @@ export class Game {
       .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
     if (!pool.length) return null;
 
-    // Right next to a goal? Step straight onto it and stop there.
+    // Right next to a free goal? Step straight onto it and stop there.
     const adjGoal = pool.find((cell) => this._isMapGoal(cell.fx, cell.fy));
     if (adjGoal) return adjGoal;
 
-    // Goal assignment (one goal per racer). Vision is shared, so a goal counts
-    // as KNOWN the moment any racer has sensed it. A known goal is "taken" if
-    // someone has stopped on it or already claimed it. This racer keeps its
-    // own nearest still-free known goal - re-picking if the one it held got
-    // taken - so racers spread across the cluster instead of all funnelling
-    // onto the same nearest goal.
-    const taken = (g) => this.mapRacers.some((o) => o !== racer &&
-      ((o.status === 'reached' && o.bx === g.bx && o.by === g.by) ||
-       (o.claimedGoal && o.claimedGoal.bx === g.bx && o.claimedGoal.by === g.by)));
-    if (racer.claimedGoal && taken(racer.claimedGoal)) racer.claimedGoal = null;
-    if (!racer.claimedGoal) {
-      const free = this.mapGoals
-        .filter((g) => this.agent2Sensed.has(`${g.bx},${g.by}`) && !taken(g))
-        .sort((a, b) => (Math.abs(a.bx - racer.bx) + Math.abs(a.by - racer.by)) -
-          (Math.abs(b.bx - racer.bx) + Math.abs(b.by - racer.by)));
-      if (free.length) racer.claimedGoal = free[0];
-    }
+    // Vision is shared, so a goal counts as KNOWN the moment any racer has
+    // sensed it. Until at least one is known, keep exploring.
+    const knownGoals = this.mapGoals.filter((g) => this.agent2Sensed.has(`${g.bx},${g.by}`));
+    if (knownGoals.length) {
+      // Once a goal is known, EVERY still-searching racer heads for the
+      // cluster - it aims at the nearest known goal whether or not someone is
+      // already stopped on it. Who ends up on which goal is sorted out by the
+      // yield below as they arrive.
+      let target = null;
+      let bestD = Infinity;
+      for (const g of knownGoals) {
+        const d = Math.abs(g.bx - racer.bx) + Math.abs(g.by - racer.by);
+        if (d < bestD) { bestD = d; target = g; }
+      }
 
-    // Have a goal: A* to it over the shared sensed-open map, routing around any
-    // racer already stopped on a goal.
-    if (racer.claimedGoal) {
-      const g = racer.claimedGoal;
-      const sensedOpen = (x, y) => this.agent2Sensed.has(`${x},${y}`) && this.blockGrid.blockOpen(x, y) &&
-        !this.mapRacers.some((o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
-      const route = findPath(sensedOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: g.bx, fy: g.by });
+      // A* over the shared sensed-open map to the target, routing around OTHER
+      // racers stopped on goals but allowing the target cell itself.
+      const sensedOpen = (x, y) => {
+        if (x === target.bx && y === target.by) return this.agent2Sensed.has(`${x},${y}`);
+        return this.agent2Sensed.has(`${x},${y}`) && this.blockGrid.blockOpen(x, y) &&
+          !this.mapRacers.some((o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
+      };
+      const route = findPath(sensedOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
       if (route && route.length >= 2) {
         const next = route[1];
-        // Minimal yielding: if the next cell is free, or the racer sitting on
-        // it can be asked to step one cell aside, take it. Without this a
-        // blocked racer would fall back to exploring AWAY from its goal and
-        // never converge; _tryClearWayFor only shuffles still-moving racers by
-        // one cell (routes already go around racers stopped on goals).
+        // Almost there and the goal is taken? BFS chain-yield: the racer parked
+        // on it slides one goal along to the nearest empty goal, pushing any in
+        // between, which frees this cell for the arriver.
+        const parked = this.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === next.fx && o.by === next.fy);
+        if (parked) this._agent2ChainYield(parked);
+        // Minimal yielding for still-moving racers in the way (one cell aside).
         if (this._tryClearWayFor(racer, next)) {
           this._updateMapPathDots(racer, route);
           return next;
         }
-        // Couldn't clear it this round - take an exploration step and re-route
+        // Blocked this round - fall through to an exploration step and re-route
         // next round rather than freezing.
       }
-      // Goal known but no sensed route reaches it yet - explore to open one up.
+      // Target not reachable over sensed ground yet - explore to open it up.
     }
     this._updateMapPathDots(racer, null);
 
     return this._agent2ExploreStep(racer, pool);
+  }
+
+  // Endgame BFS chain-yield ("连锁让位"). When an arriving racer wants the goal
+  // `parked` is stopped on, `parked` slides one cell to an adjacent goal; if
+  // that goal is taken too its occupant slides on in turn - a BFS across the
+  // 4-connected goal cluster that ends at the nearest goal nobody stands on,
+  // freeing the cell the arriver needs. Every shifted racer stays 'reached'
+  // (it only hops goal->adjacent goal and re-settles at once), so the cluster
+  // just shuffles over by one. Returns true if parked's cell was freed.
+  _agent2ChainYield(parked) {
+    const goalAt = (x, y) => this.mapGoals.some((g) => g.bx === x && g.by === y);
+    const racerOn = (x, y) => this.mapRacers.find((r) => r.bx === x && r.by === y);
+
+    // BFS over goal cells from parked's cell to the nearest goal nobody is on.
+    const startK = `${parked.bx},${parked.by}`;
+    const prev = new Map([[startK, null]]);
+    const queue = [{ bx: parked.bx, by: parked.by }];
+    let head = 0;
+    let free = null;
+    while (head < queue.length) {
+      const cur = queue[head++];
+      const isStart = cur.bx === parked.bx && cur.by === parked.by;
+      if (!isStart && !racerOn(cur.bx, cur.by)) { free = cur; break; }
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cur.bx + dx, ny = cur.by + dy;
+        if (!goalAt(nx, ny)) continue;
+        const k = `${nx},${ny}`;
+        if (prev.has(k)) continue;
+        prev.set(k, cur);
+        queue.push({ bx: nx, by: ny });
+      }
+    }
+    if (!free) return false;
+
+    // Reconstruct the chain: chain[0] = parked's cell, chain[last] = free goal.
+    const chain = [];
+    for (let c = free; c; c = prev.get(`${c.bx},${c.by}`)) chain.push(c);
+    chain.reverse();
+
+    // Every racer that must slide has to be a settled racer standing still.
+    for (let i = 0; i < chain.length - 1; i++) {
+      const r = racerOn(chain[i].bx, chain[i].by);
+      if (!r || r.status !== 'reached' || r.shape.isBusy() || r.pendingDir) return false;
+    }
+
+    // Slide from the free end backward so each target cell is empty in turn.
+    for (let i = chain.length - 2; i >= 0; i--) {
+      const r = racerOn(chain[i].bx, chain[i].by);
+      r.path = null;
+      this._applyMapMove(r, { fx: chain[i + 1].bx, fy: chain[i + 1].by });
+    }
+    // chain[0] is now empty - reset its marker to neutral until someone lands.
+    const gi = this.mapGoals.findIndex((g) => g.bx === chain[0].bx && g.by === chain[0].by);
+    if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+    return true;
   }
 
   // One blind-exploration step: prefer ground nobody has stood on (shared
