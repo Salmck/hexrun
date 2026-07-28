@@ -1009,19 +1009,30 @@ export class Game {
     // It should always be askable to step aside; _forceVacate's own
     // depth-0 restriction is what actually bounds how far this reaches.
     const blockerIsParked = this.mapStrategy === 'agent2' && blocker.status === 'reached';
-    if (!blockerIsParked) {
-      // Otherwise, whoever is objectively closer to finishing its own
-      // current route wins the cell; the other waits or detours instead.
-      // Without this, two racers whose routes both genuinely need the same
-      // cell (a shared chokepoint) just keep evicting each other back and
-      // forth forever - racer A displaces B, B's own path says to come
-      // straight back so it does, immediately re-displacing A, on and on.
-      const racerRemaining = racer.path ? racer.path.length - racer.pathIndex : Infinity;
-      const blockerRemaining = blocker.path ? blocker.path.length - blocker.pathIndex : Infinity;
-      const racerHasPriority = racerRemaining < blockerRemaining ||
-        (racerRemaining === blockerRemaining && racer.id < blocker.id);
-      if (!racerHasPriority) return false;
+    if (blockerIsParked) {
+      // A settled racer in the way first tries to slide out goal-to-goal via a
+      // clean chain to the nearest ownerless goal, freeing this cell without
+      // un-settling anyone. That fails only in the endgame corner where the
+      // sole remaining free goal is the ARRIVING racer's own target (so no
+      // ownerless goal is reachable for the chain) - there, fall back to
+      // briefly bumping the settled racer off onto a non-goal cell so the
+      // arriver can pass; it re-settles right after.
+      if (this._agent2ChainYield(blocker)) return this._mapCellAvailable(next.fx, next.fy, racer);
+      if (this._forceVacate(blocker, new Set([racer.id]))) return this._mapCellAvailable(next.fx, next.fy, racer);
+      return false;
     }
+
+    // Otherwise, whoever is objectively closer to finishing its own current
+    // route wins the cell; the other waits or detours instead. Without this,
+    // two racers whose routes both genuinely need the same cell (a shared
+    // chokepoint) just keep evicting each other back and forth forever -
+    // racer A displaces B, B's own path says to come straight back so it does,
+    // immediately re-displacing A, on and on.
+    const racerRemaining = racer.path ? racer.path.length - racer.pathIndex : Infinity;
+    const blockerRemaining = blocker.path ? blocker.path.length - blocker.pathIndex : Infinity;
+    const racerHasPriority = racerRemaining < blockerRemaining ||
+      (racerRemaining === blockerRemaining && racer.id < blocker.id);
+    if (!racerHasPriority) return false;
 
     if (!this._forceVacate(blocker, new Set([racer.id]))) return false;
     return this._mapCellAvailable(next.fx, next.fy, racer);
@@ -1033,17 +1044,14 @@ export class Game {
   // (agent2 only) since stepping there doubles as exploration - and since
   // goals cluster, that unexplored patch might hold one.
   //
-  // A reached agent2 racer can be bumped too, but only as the direct
-  // (depth 0) blocker - with a tight goal cluster sometimes having only one
-  // practical entrance, routing around every claimed cell forever can wall
-  // the rest of the cluster off completely, so someone has to be allowed to
-  // ask the one racer literally in the doorway to step aside. It's flipped
-  // back to 'solving' with its claimedGoal untouched, so the ordinary
-  // trail-move logic just walks it straight back and it re-claims the same
-  // goal the moment it steps on it again. Restricting this to depth 0 (never
-  // recursing into a SECOND reached racer to make room for the first)
-  // bounds it to one displacement per resolution instead of a domino chain
-  // of every resident in a busy cluster shuffling at once.
+  // Settled racers normally step aside via _agent2ChainYield (a clean
+  // goal-to-goal slide that never un-settles anyone). This routine only bumps
+  // a settled racer as a last-resort FALLBACK - the direct (depth-0) blocker
+  // in the endgame corner where no ownerless goal exists for a chain, e.g.
+  // the only free goal left is the arriving racer's own target. It's flipped
+  // back to 'solving' with its claim released, so it just re-grabs the
+  // nearest free goal (often the one it briefly vacated) next tick. Depth-0
+  // only, so this never dominoes a whole cluster.
   _forceVacate(racer, visited, depth = 0) {
     // Already mid-animation from its own turn earlier this same tick -
     // racer.bx/by is already updated for that move, so moving it again now
@@ -1077,19 +1085,11 @@ export class Game {
       racer.blockedAttempts = 0;
       this._updateMapPathDots(racer, null);
       if (canDisplaceReached) {
-        // Release the goal outright instead of forcing a march back to this
-        // exact cell. A yielded racer becomes a free solver again and will
-        // grab whichever discovered goal is nearest next tick - often the
-        // one it was just on (now free again), but just as happily a
-        // different free one. Rigidly making every displaced racer return
-        // to its ORIGINAL goal is what deadlocked tight clusters: racers
-        // ended up in a permutation cycle, each standing on the exact goal
-        // another was rigidly waiting for, with no one able to rotate.
-        // Freeing the claim lets the cluster resolve as "nearest free racer
-        // takes nearest free goal" instead.
+        // Fallback bump of a settled racer: release its goal so it becomes a
+        // free solver again and re-grabs the nearest free goal next tick
+        // (often the one it just left, now free) - reset the marker to neutral
+        // so it doesn't keep showing this racer's colour while unowned.
         if (racer.claimedGoal) {
-          // Its goal is unclaimed again - drop the marker back to neutral so
-          // it doesn't keep showing this racer's colour while nobody owns it.
           const gi = this.mapGoals.findIndex((g) => g.bx === racer.claimedGoal.bx && g.by === racer.claimedGoal.by);
           if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
           racer.claimedGoal.claimedBy = null;
@@ -1097,12 +1097,11 @@ export class Game {
         racer.claimedGoal = null;
         racer.status = 'solving';
       } else {
-        // An ordinary bumped racer's very next A* replan will otherwise
-        // often find that the shortest route back to wherever it's headed
-        // cuts right back through the cell it just vacated, causing it to
-        // immediately step back - a visible yo-yo with whoever it made way
-        // for. Closing that one cell off for a few steps forces an actual
-        // detour instead.
+        // The racer's very next A* replan will otherwise often find that the
+        // shortest route back to wherever it's headed cuts right back through
+        // the cell it just vacated, causing it to immediately step back - a
+        // visible yo-yo with whoever it made way for. Closing that one cell
+        // off for a few steps forces an actual detour instead.
         racer.avoidCell = oldCell;
         racer.avoidSteps = 3;
       }
@@ -1868,58 +1867,81 @@ export class Game {
     return candidates[Math.floor(Math.random() * candidates.length)];
   }
 
-  // Endgame goal handoff ("让位"). A racer beelining to its own claimed but
-  // still-free goal G often passes right next to a NEARER goal N that another
-  // racer has already settled on. Routing the newcomer the long way around a
-  // tight cluster to reach G is exactly what jams the endgame, so instead the
-  // parked racer gives up N and inherits G: the newcomer takes the closest
-  // goal, the incumbent relocates outward to the one just vacated.
+  // Endgame chain-yield ("连锁让位"). When an arriving racer needs the cell a
+  // settled racer is parked on, that settled racer does NOT scatter to a
+  // random cell and go back to solving (which is what made the A* lines blink
+  // and the whole cluster thrash). Instead it slides one step to an adjacent
+  // goal; if that goal is taken too, ITS occupant slides on in turn - a clean
+  // chain across the goal cluster that ends at the nearest goal nobody owns.
+  // The cell the arriving racer wanted is freed, and because every shifted
+  // racer stays 'reached' the entire time (it only ever hops goal->adjacent
+  // goal), the reached count never dips and none of them ever shows a route
+  // line: the cluster simply shuffles over by one to make room.
   //
-  // This is a pure 1-for-1 swap and cannot starve or cascade: G is guaranteed
-  // free (this racer was the sole claimant), so the displaced racer always has
-  // a definite home, and the count of unclaimed goals is unchanged. It only
-  // fires when the newcomer is genuinely "即将到达" (N within HANDOFF_RANGE)
-  // and N is strictly closer than G, keeping it a small local shuffle rather
-  // than a global reshuffle recomputed every tick. The actual physical
-  // stepping-aside is still handled by the existing _forceVacate BFS cascade
-  // as the newcomer arrives - here we only reassign who owns which goal.
-  _agent2TryGoalHandoff(racer) {
-    const HANDOFF_RANGE = 4;
-    const G = racer.claimedGoal;
-    if (!G) return;
-    const dToG = Math.abs(G.bx - racer.bx) + Math.abs(G.by - racer.by);
-    let best = null;
-    let bestD = Infinity;
-    for (const N of this.agent2Discovered) {
-      if (N === G || N.claimedBy === null || N.claimedBy === racer.id) continue;
-      // The claimant must actually be parked on N right now - a racer merely
-      // heading toward N (not yet arrived) isn't blocking it, so there's
-      // nothing to hand over.
-      const occupant = this.mapRacers.find((o) => o.id === N.claimedBy && o.status === 'reached');
-      if (!occupant || occupant.bx !== N.bx || occupant.by !== N.by) continue;
-      const dToN = Math.abs(N.bx - racer.bx) + Math.abs(N.by - racer.by);
-      if (dToN >= dToG || dToN > HANDOFF_RANGE) continue; // no gain, or not close enough yet
-      if (dToN < bestD) { bestD = dToN; best = { N, occupant }; }
-    }
-    if (!best) return;
+  // Returns true if `parked`'s cell was freed. Falls through (false) when no
+  // ownerless goal is reachable purely across goal cells or some link in the
+  // chain isn't a settled racer sitting still - the caller then waits or uses
+  // the ordinary solving-racer cascade instead.
+  _agent2ChainYield(parked) {
+    const goalAt = (x, y) => this.mapGoals.some((g) => g.bx === x && g.by === y);
+    const racerOn = (x, y) => this.mapRacers.find((r) => r.bx === x && r.by === y);
+    const entryOf = (x, y) => this.agent2Discovered.find((g) => g.bx === x && g.by === y);
 
-    const { N, occupant } = best;
-    // Newcomer takes the near goal; free the far one for the incumbent.
-    G.claimedBy = null;
-    N.claimedBy = racer.id;
-    racer.claimedGoal = N;
-    racer.path = null;
-    this._updateMapPathDots(racer, null);
-    // The incumbent becomes a free solver again; next tick it re-claims the
-    // nearest unclaimed goal (G, just vacated, is normally it). Reset N's
-    // marker to neutral until whoever ends up there actually arrives.
-    occupant.status = 'solving';
-    occupant.claimedGoal = null;
-    occupant.path = null;
-    occupant.previousCell = null;
-    this._updateMapPathDots(occupant, null);
-    const gi = this.mapGoals.findIndex((g) => g.bx === N.bx && g.by === N.by);
+    // BFS across the goal cluster (goals are 4-connected) from the parked
+    // racer's goal to the nearest goal that nobody stands on and nobody has
+    // claimed - a genuine free home, never one another racer is en route to.
+    const startK = `${parked.bx},${parked.by}`;
+    const prev = new Map([[startK, null]]);
+    const queue = [{ bx: parked.bx, by: parked.by }];
+    let head = 0;
+    let free = null;
+    while (head < queue.length) {
+      const cur = queue[head++];
+      const e = entryOf(cur.bx, cur.by);
+      const isStart = cur.bx === parked.bx && cur.by === parked.by;
+      if (!isStart && e && e.claimedBy === null && !racerOn(cur.bx, cur.by)) { free = cur; break; }
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cur.bx + dx, ny = cur.by + dy;
+        if (!goalAt(nx, ny) || !entryOf(nx, ny)) continue; // only discovered goal cells
+        const k = `${nx},${ny}`;
+        if (prev.has(k)) continue;
+        prev.set(k, cur);
+        queue.push({ bx: nx, by: ny });
+      }
+    }
+    if (!free) return false;
+
+    // Reconstruct the chain: chain[0] = parked's cell, chain[last] = free goal.
+    const chain = [];
+    for (let c = free; c; c = prev.get(`${c.bx},${c.by}`)) chain.push(c);
+    chain.reverse();
+
+    // Every racer that must slide (all but the free end) has to be a settled
+    // racer standing still, or a clean one-step shift isn't possible.
+    for (let i = 0; i < chain.length - 1; i++) {
+      const r = racerOn(chain[i].bx, chain[i].by);
+      if (!r || r.status !== 'reached' || r.shape.isBusy() || r.pendingDir) return false;
+    }
+
+    // Slide from the free end backward so every target cell is already empty
+    // when its predecessor moves in. Each racer keeps 'reached' status (it
+    // re-settles the instant it lands on the adjacent goal) and shows no line.
+    for (let i = chain.length - 2; i >= 0; i--) {
+      const r = racerOn(chain[i].bx, chain[i].by);
+      const target = chain[i + 1];
+      const oldEntry = entryOf(chain[i].bx, chain[i].by);
+      const newEntry = entryOf(target.bx, target.by);
+      if (oldEntry) oldEntry.claimedBy = null;
+      if (newEntry) newEntry.claimedBy = r.id;
+      r.claimedGoal = newEntry || null;
+      r.path = null;
+      this._applyMapMove(r, { fx: target.bx, fy: target.by });
+    }
+    // chain[0] is now empty and unowned - reset its marker to neutral until
+    // the arriving racer (or whoever) settles there.
+    const gi = this.mapGoals.findIndex((g) => g.bx === chain[0].bx && g.by === chain[0].by);
     if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+    return true;
   }
 
   _chooseAgent2Move(racer) {
@@ -1946,10 +1968,6 @@ export class Game {
     }
 
     if (racer.claimedGoal) {
-      // Endgame "让位": if a nearer goal a parked racer is sitting on is worth
-      // taking, swap onto it and send that racer to this one's (now free) goal
-      // instead of routing the long way around the cluster.
-      this._agent2TryGoalHandoff(racer);
       const move = this._chooseAgent2TrailMove(racer);
       if (move) return move;
       // No known route to the claimed goal yet - keep exploring (which also
