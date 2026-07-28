@@ -1728,61 +1728,44 @@ export class Game {
     return this._chooseLocalYieldMove(racer, next);
   }
 
-  // Once claimed, route to the goal over the shared known map via A*.
+  // Once claimed, route to the goal via A* over the FIXED obstacle map only.
   //
-  // Preferred routing (tier 1) goes AROUND every other racer's already-taken
-  // goal cell, approaching this racer's own goal from a non-goal neighbour.
-  // That matters because goals cluster together: the plain shortest path to
-  // an inner goal usually slices straight through an outer goal a racer is
-  // already parked on, where it then jams forever. Since goal generation
-  // guarantees each goal keeps an open non-goal neighbour, a side route
-  // normally exists. Tier 2 (only if no side route is found) falls back to
-  // routing through occupied goals and letting _tryClearWayFor bump the
-  // parked racer aside - a last resort for the occasional layout where a
-  // goal really is only reachable across another.
+  // Other racers - including ones parked on their own reached goal - are
+  // never treated as walls here, so no object's position can distort, bend,
+  // or lengthen the planned route. The line is always the shortest path over
+  // the terrain the racer knows. Occupancy is a purely local concern,
+  // resolved only when the racer actually reaches an occupied cell: it waits
+  // for a transient blocker, or _tryClearWayFor / _forceVacate asks a parked
+  // racer to step aside. That keeps avoidance where it belongs - up close -
+  // instead of baking every other object into the global plan.
   _buildAgent2TrailPath(racer) {
     if (!racer.claimedGoal) return null;
     const goal = racer.claimedGoal;
     const knownOpen = (x, y) => this.agent2KnownOpen.has(`${x},${y}`);
-    // A cell just vacated under a bump is closed off briefly so the replan
-    // doesn't instantly backtrack through it.
+    // A cell this racer itself just vacated under a bump is closed off for a
+    // few steps so the replan doesn't instantly backtrack through it. (This
+    // is about the racer's OWN recent move, not another object's position.)
     const avoiding = (x, y) => racer.avoidSteps > 0 && racer.avoidCell &&
       x === racer.avoidCell.bx && y === racer.avoidCell.by;
-    // Another racer permanently sitting on its own reached goal - a fixed
-    // obstacle to route around (never this racer's own destination).
-    const otherReached = (x, y) => this.mapRacers.some((o) =>
-      o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
 
     const from = { fx: racer.bx, fy: racer.by };
     const to = { fx: goal.bx, fy: goal.by };
-    const around = (x, y) => knownOpen(x, y) && !avoiding(x, y) && !otherReached(x, y);
-    let path = findPath(around, this.blockGrid.blocksX, from, to);
-    if (path) return path;
-    // Tier 2: allow crossing occupied goals (bump resolves them).
-    const through = (x, y) => knownOpen(x, y) && !avoiding(x, y);
-    path = findPath(through, this.blockGrid.blocksX, from, to);
-    if (path) return path;
-
-    // Tiers 1-2 route only over cells actually sensed to be open. Until the
-    // corridor to the goal has been explored end to end they usually find
-    // nothing, which is what made the A* line flicker on and off and drop the
-    // racer back into blind wandering. Once the goal's LOCATION is known,
-    // though, a racer can commit to it: route OPTIMISTICALLY straight for it,
-    // treating not-yet-sensed cells as passable and avoiding only cells
-    // already sensed to be walls. Every step first senses the four
-    // neighbours, so the immediate next cell is always genuinely open; a
-    // wrong guess further along is simply re-planned the moment its wall is
-    // sensed. The result is a steady beeline (and a steady dotted line) that
-    // self-corrects as the real walls are revealed, instead of reverting to
-    // aimless search whenever the fully-known route momentarily breaks.
     const bg = this.blockGrid;
     const notWall = (x, y) => x >= 0 && x < bg.blocksX && y >= 0 && y < bg.blocksY &&
       !this.agent2KnownWall.has(`${x},${y}`);
-    const optimisticAround = (x, y) => notWall(x, y) && !avoiding(x, y) && !otherReached(x, y);
-    path = findPath(optimisticAround, bg.blocksX, from, to);
+
+    // Prefer a route over cells already sensed open. Until the corridor to the
+    // goal has been explored end to end that often finds nothing, which is
+    // what made the A* line flicker on and off; so fall back to an OPTIMISTIC
+    // route that treats not-yet-sensed cells as passable and avoids only cells
+    // already sensed to be walls. Every step first senses the four neighbours,
+    // so the immediate next cell is always genuinely open; a wrong guess
+    // further along is re-planned the moment its wall is sensed. The result is
+    // a steady beeline (and a steady dotted line) that self-corrects as the
+    // real walls are revealed, instead of reverting to blind search.
+    let path = findPath((x, y) => knownOpen(x, y) && !avoiding(x, y), bg.blocksX, from, to);
     if (path) return path;
-    const optimisticThrough = (x, y) => notWall(x, y) && !avoiding(x, y);
-    path = findPath(optimisticThrough, bg.blocksX, from, to);
+    path = findPath((x, y) => notWall(x, y) && !avoiding(x, y), bg.blocksX, from, to);
     if (path) return path;
     if (racer.avoidSteps > 0) {
       racer.avoidSteps = 0;
