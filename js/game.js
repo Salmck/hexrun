@@ -715,6 +715,8 @@ export class Game {
     if (isAgent2) {
       this.agent2Visited = new Set(starts.map((s) => `${s.fx},${s.fy}`));
       this.agent2Sensed = new Set();
+      this._agent2PrevReached = 0;
+      this._agent2StallTicks = 0;
     }
 
     const cellSize = this.forwardStep;
@@ -1540,6 +1542,32 @@ export class Game {
     return pool[Math.floor(Math.random() * pool.length)];
   }
 
+  // Global no-progress watchdog, run once per frame. The per-racer idle count
+  // only catches a racer that's frozen; a livelock more often shows up as a
+  // knot of racers THRASHING (shuffling back and forth) so none is ever idle,
+  // yet none reaches a goal either. This watches the swarm-wide reached count:
+  // if it hasn't risen for a long stretch (and not everyone is home), every
+  // still-unreached racer is kicked into a scatter at once, breaking whatever
+  // mutual configuration they were locked in so they can re-plan from fresh
+  // spots. The threshold is high enough that ordinary travel between reaches
+  // never trips it.
+  _agent2CheckStall() {
+    const reached = this.mapRacers.reduce((n, r) => n + (r.status === 'reached' ? 1 : 0), 0);
+    if (reached === this.mapRacers.length) return; // everyone home
+    if (reached !== this._agent2PrevReached) {
+      this._agent2PrevReached = reached;
+      this._agent2StallTicks = 0;
+      return;
+    }
+    this._agent2StallTicks = (this._agent2StallTicks || 0) + 1;
+    if (this._agent2StallTicks > 150) {
+      for (const r of this.mapRacers) {
+        if (r.status === 'solving') r.scatterSteps = Math.max(r.scatterSteps || 0, 8);
+      }
+      this._agent2StallTicks = 0;
+    }
+  }
+
   // ---------------------------------------------------------------------
   // Camera, input, and the render loop (shared by both modes).
   // ---------------------------------------------------------------------
@@ -1720,6 +1748,7 @@ export class Game {
           racer.shadow.position.set(p.x, 0.02, p.z);
         }
       } else {
+        if (this.mapStrategy === 'agent2') this._agent2CheckStall();
         for (const racer of this.mapRacers) {
           if (!racer.shape.isBusy()) {
             if (racer.pendingDir) {
