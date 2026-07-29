@@ -3,6 +3,7 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=82';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -681,7 +682,7 @@ export class Game {
     // keeps the single shared goal nearest the map centre.
     let goalCells;
     if (isAgent2) {
-      goalCells = this._pickScatteredGoals(openCells, this.racerCount);
+      goalCells = pickScatteredGoals(this, openCells, this.racerCount);
     } else {
       const center = { fx: (blocksX - 1) / 2, fy: (blocksY - 1) / 2 };
       goalCells = [[...openCells].sort((a, b) =>
@@ -707,15 +708,9 @@ export class Game {
       starts.push({ fx: best.fx, fy: best.fy });
     }
 
-    // Agent mode 2: shared exploration state. agent2Visited is the one common
-    // record of every cell any racer has stood on (so the swarm avoids
-    // retracing ground the group has already covered - "尽量不走回头路"), and
-    // agent2Sensed is the one shared field of view (every ±1 sense any racer
-    // makes is added here, so vision is pooled - "视野共享").
-    if (isAgent2) {
-      this.agent2Visited = new Set(starts.map((s) => `${s.fx},${s.fy}`));
-      this.agent2Sensed = new Set();
-    }
+    // Agent mode 2's shared exploration state (visited + pooled vision) lives
+    // in js/agent2.js, along with the whole mode's movement AI.
+    if (isAgent2) agent2SetupState(this, starts);
 
     const cellSize = this.forwardStep;
     const blockStep = MAZE_RATIO * cellSize; // world distance between adjacent block centers
@@ -876,10 +871,10 @@ export class Game {
     } else if (this.mapStrategy === 'agent') {
       next = this.agentGoalKnown ? this._chooseDiscoveredPathMove(racer) : this._chooseAgentExploreMove(racer);
     } else if (this.mapStrategy === 'agent2') {
-      next = this._chooseAgent2Move(racer);
+      next = agent2ChooseMove(this, racer);
       // Count consecutive rounds this racer couldn't move; a long streak means
       // it's wedged in a jam the yield/chain-yield logic can't rotate out of.
-      // _chooseAgent2Move watches this and breaks the deadlock with a scatter.
+      // agent2ChooseMove watches this and breaks the deadlock with a scatter.
       if (!next) { racer.idleTicks = (racer.idleTicks || 0) + 1; return; }
     } else {
       next = this._choosePathMove(racer);
@@ -907,7 +902,7 @@ export class Game {
       // from the new spot (both shared). If it's a goal, the racer has found
       // one - it stops right there.
       this.agent2Visited.add(`${racer.bx},${racer.by}`);
-      this._agent2Sense(racer);
+      agent2Sense(this, racer);
       if (this._isMapGoal(racer.bx, racer.by)) {
         racer.status = 'reached';
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
@@ -1258,287 +1253,6 @@ export class Game {
     return this._chooseLocalYieldMove(racer, next);
   }
 
-  // Count goals with NO open, non-goal neighbour - i.e. fully walled in by
-  // walls and other goals. Such a goal can't be reached without crossing
-  // another goal, so once its neighbours are filled it becomes physically
-  // unreachable and the endgame deadlocks. Testing showed convergence is
-  // reliable exactly when this is zero, so _pickScatteredGoals retries goal
-  // placement until it is.
-  _countEnclosedGoals(goals) {
-    const gs = new Set(goals.map((g) => `${g.fx},${g.fy}`));
-    return goals.filter((g) => ![[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => {
-      const nx = g.fx + dx, ny = g.fy + dy;
-      return this.blockGrid.blockOpen(nx, ny) && !gs.has(`${nx},${ny}`);
-    })).length;
-  }
-
-  // Grow N clustered goals, retrying from fresh random seeds until the whole
-  // layout has zero enclosed goals (guaranteeing every goal is reachable
-  // from the surrounding open map without crossing another). The maze is
-  // far larger than the handful of goals, so a valid thin cluster almost
-  // always turns up within a few tries; the best-so-far is kept as a
-  // fallback in the rare case none is perfect.
-  _pickScatteredGoals(openCells, count) {
-    let best = null, bestEnclosed = Infinity;
-    for (let attempt = 0; attempt < 80; attempt++) {
-      const goals = this._growGoalCluster(openCells, count);
-      if (goals.length < count) continue;
-      const enclosed = this._countEnclosedGoals(goals);
-      if (enclosed === 0) return goals;
-      if (enclosed < bestEnclosed) { bestEnclosed = enclosed; best = goals; }
-    }
-    return best || this._growGoalCluster(openCells, count);
-  }
-
-  // "Agent" strategy 2: N goals clustered together (adjacent via
-  // 4-connectivity) - but deliberately NOT a solid blob. Start from one goal
-  // and grow the cluster one 4-adjacent cell at a time, refusing any cell
-  // that would leave some goal (or the new cell itself) fully surrounded by
-  // other goals. Keeping every goal with at least one open non-goal
-  // neighbour means each is reachable from the open map around the cluster
-  // without ever crossing another goal - so the last racers can always fill
-  // even the innermost goal, instead of a filled-in blob's centre becoming
-  // physically unreachable once its neighbours are taken (which deadlocked
-  // the endgame).
-  _growGoalCluster(openCells, count) {
-    const goals = [];
-    const goalSet = new Set();
-    const openSet = new Set(openCells.map(c => `${c.fx},${c.fy}`));
-    if (openCells.length === 0) return goals;
-
-    const nbrKeys = (x, y) => [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => `${x + dx},${y + dy}`);
-    // Would adding `cellKey` keep every affected goal (and cellKey itself)
-    // with at least one open, non-goal neighbour?
-    const keepsSideAccess = (cellKey) => {
-      const prospective = new Set(goalSet);
-      prospective.add(cellKey);
-      const hasFreeNbr = (k) => {
-        const [x, y] = k.split(',').map(Number);
-        return nbrKeys(x, y).some((nk) => openSet.has(nk) && !prospective.has(nk));
-      };
-      if (!hasFreeNbr(cellKey)) return false;
-      const [cx, cy] = cellKey.split(',').map(Number);
-      for (const nk of nbrKeys(cx, cy)) {
-        if (goalSet.has(nk) && !hasFreeNbr(nk)) return false;
-      }
-      return true;
-    };
-
-    const first = openCells[Math.floor(Math.random() * openCells.length)];
-    goals.push(first);
-    goalSet.add(`${first.fx},${first.fy}`);
-
-    const goalNbrCount = (cellKey) => {
-      const [x, y] = cellKey.split(',').map(Number);
-      return nbrKeys(x, y).filter((nk) => goalSet.has(nk)).length;
-    };
-
-    for (let i = 1; i < count; i++) {
-      const adjacent = new Set();
-      for (const goal of goals) {
-        for (const nk of nbrKeys(goal.fx, goal.fy)) {
-          if (openSet.has(nk) && !goalSet.has(nk)) adjacent.add(nk);
-        }
-      }
-      // Grow the cluster like a thin snake, not a solid blob: among the cells
-      // that keep every goal side-accessible, always pick one touching the
-      // FEWEST existing goals (a pure 1-neighbour extension of the tip, never
-      // filling in a concavity that would wall a cell in). This is what keeps
-      // the shape a line/branch - clustered ("挨在一起") but never enclosing.
-      let pool = [...adjacent].filter(keepsSideAccess);
-      if (!pool.length) pool = [...adjacent];
-      if (pool.length) {
-        const minTouch = Math.min(...pool.map(goalNbrCount));
-        pool = pool.filter((k) => goalNbrCount(k) === minTouch);
-      }
-      if (!pool.length) {
-        for (const k of openSet) if (!goalSet.has(k)) pool.push(k);
-      }
-      if (!pool.length) break;
-
-      const chosen = pool[Math.floor(Math.random() * pool.length)];
-      const [fx, fy] = chosen.split(',').map(Number);
-      goals.push({ fx, fy });
-      goalSet.add(chosen);
-    }
-
-    return goals;
-  }
-
-  // Adds the racer's own cell and its four neighbours to the one shared field
-  // of view. Vision is pooled, so what any racer sees, every racer "knows".
-  _agent2Sense(racer) {
-    this.agent2Sensed.add(`${racer.bx},${racer.by}`);
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      this.agent2Sensed.add(`${racer.bx + dx},${racer.by + dy}`);
-    }
-  }
-
-  // Agent mode 2 movement AI. Each racer moves one big cell (= 4 tumbles) per
-  // step. It explores blindly until a goal turns up in the SHARED field of
-  // view; once one has, it takes its own nearest still-free goal and A*-routes
-  // there over the shared sensed map, drawing the line. Landing on a goal
-  // stops it (handled in _applyMapMove). Returns null when boxed in.
-  _chooseAgent2Move(racer) {
-    this._agent2Sense(racer);
-
-    // Open, unoccupied neighbouring cells it could step onto.
-    const pool = Object.values(MAP_DIR_DELTAS)
-      .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
-      .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
-    if (!pool.length) return null;
-
-    // Deadlock breaker. If this racer has been stuck for a long stretch (a jam
-    // the yield / chain-yield logic can't rotate out of - a knot of racers all
-    // waiting on each other), random-walk a handful of steps to physically
-    // shake the configuration loose, then re-plan. Rare and short, so it
-    // doesn't disturb normal movement.
-    if ((racer.idleTicks || 0) > 20) { racer.scatterSteps = 6; racer.idleTicks = 0; }
-    if ((racer.scatterSteps || 0) > 0) {
-      racer.scatterSteps -= 1;
-      racer.path = null;
-      this._updateMapPathDots(racer, null);
-      const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
-      const cands = fwd.length ? fwd : pool;
-      return cands[Math.floor(Math.random() * cands.length)];
-    }
-
-    // Right next to a free goal? Step straight onto it and stop there.
-    const adjGoal = pool.find((cell) => this._isMapGoal(cell.fx, cell.fy));
-    if (adjGoal) return adjGoal;
-
-    // Vision is shared, so a goal counts as KNOWN the moment any racer has
-    // sensed it. Until at least one is known, keep exploring.
-    const knownGoals = this.mapGoals.filter((g) => this.agent2Sensed.has(`${g.bx},${g.by}`));
-    if (knownGoals.length) {
-      // Once a goal is known, EVERY still-searching racer heads for the
-      // cluster - it aims at the nearest known goal whether or not someone is
-      // already stopped on it. Who ends up on which goal is sorted out by the
-      // yield below as they arrive.
-      let target = null;
-      let bestD = Infinity;
-      for (const g of knownGoals) {
-        const d = Math.abs(g.bx - racer.bx) + Math.abs(g.by - racer.by);
-        if (d < bestD) { bestD = d; target = g; }
-      }
-
-      // A* plans over the shared sensed map using WALLS ONLY - no racer,
-      // stationary or moving, is ever treated as an obstacle, so the line is
-      // never bent or held up by another object. Occupancy of the single next
-      // cell is the only thing resolved locally below (chain-yield for a racer
-      // stopped on a goal in the way, progress-based yield for a moving one).
-      const sensedOpen = (x, y) => this.agent2Sensed.has(`${x},${y}`) && this.blockGrid.blockOpen(x, y);
-      const route = findPath(sensedOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
-      if (route && route.length >= 2) {
-        // Publish how far this racer still has to go so _tryClearWayFor's
-        // yield is decided by PROGRESS, not id: a moving racer in the way that
-        // is farther from its own goal (or just exploring, path === null)
-        // steps aside for one closer to finishing. This is what keeps a moving
-        // object from ever holding up the A* line - the route itself already
-        // ignores moving racers entirely; only the single shared next cell is
-        // arbitrated, and it's arbitrated in the A* follower's favour.
-        racer.path = route;
-        racer.pathIndex = 0;
-        // We have a route to a goal - draw the line and keep it up steadily,
-        // even on a round the racer can't actually advance (so it doesn't
-        // blink off every time it's momentarily blocked).
-        this._updateMapPathDots(racer, route);
-        const next = route[1];
-        // Almost there and the goal is taken? BFS chain-yield: the racer parked
-        // on it slides one goal along to the nearest empty goal, pushing any in
-        // between, which frees this cell for the arriver.
-        const parked = this.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === next.fx && o.by === next.fy);
-        if (parked) this._agent2ChainYield(parked);
-        if (this._tryClearWayFor(racer, next)) return next;
-        // Only a racer even closer to its own goal holds the cell this round -
-        // WAIT (line stays up) rather than wandering off; advances once clear.
-        return null;
-      }
-      // Target not reachable over sensed ground yet - keep exploring to open it
-      // up (no route, so no line to show).
-    }
-    // Not heading to a goal this round - drop any stale route so it counts as
-    // lowest priority and yields to racers that ARE following one.
-    racer.path = null;
-    this._updateMapPathDots(racer, null);
-
-    return this._agent2ExploreStep(racer, pool);
-  }
-
-  // Endgame BFS chain-yield ("连锁让位"). When an arriving racer wants the goal
-  // `parked` is stopped on, `parked` slides one cell to an adjacent goal; if
-  // that goal is taken too its occupant slides on in turn - a BFS across the
-  // 4-connected goal cluster that ends at the nearest goal nobody stands on,
-  // freeing the cell the arriver needs. Every shifted racer stays 'reached'
-  // (it only hops goal->adjacent goal and re-settles at once), so the cluster
-  // just shuffles over by one. Returns true if parked's cell was freed.
-  _agent2ChainYield(parked) {
-    const goalAt = (x, y) => this.mapGoals.some((g) => g.bx === x && g.by === y);
-    const racerOn = (x, y) => this.mapRacers.find((r) => r.bx === x && r.by === y);
-
-    // BFS over goal cells from parked's cell to the nearest goal nobody is on.
-    const startK = `${parked.bx},${parked.by}`;
-    const prev = new Map([[startK, null]]);
-    const queue = [{ bx: parked.bx, by: parked.by }];
-    let head = 0;
-    let free = null;
-    while (head < queue.length) {
-      const cur = queue[head++];
-      const isStart = cur.bx === parked.bx && cur.by === parked.by;
-      if (!isStart && !racerOn(cur.bx, cur.by)) { free = cur; break; }
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const nx = cur.bx + dx, ny = cur.by + dy;
-        if (!goalAt(nx, ny)) continue;
-        const k = `${nx},${ny}`;
-        if (prev.has(k)) continue;
-        prev.set(k, cur);
-        queue.push({ bx: nx, by: ny });
-      }
-    }
-    if (!free) return false;
-
-    // Reconstruct the chain: chain[0] = parked's cell, chain[last] = free goal.
-    const chain = [];
-    for (let c = free; c; c = prev.get(`${c.bx},${c.by}`)) chain.push(c);
-    chain.reverse();
-
-    // Every racer that must slide has to be a settled racer standing still.
-    for (let i = 0; i < chain.length - 1; i++) {
-      const r = racerOn(chain[i].bx, chain[i].by);
-      if (!r || r.status !== 'reached' || r.shape.isBusy() || r.pendingDir) return false;
-    }
-
-    // Slide from the free end backward so each target cell is empty in turn.
-    for (let i = chain.length - 2; i >= 0; i--) {
-      const r = racerOn(chain[i].bx, chain[i].by);
-      r.path = null;
-      this._applyMapMove(r, { fx: chain[i + 1].bx, fy: chain[i + 1].by });
-    }
-    // chain[0] is now empty - reset its marker to neutral until someone lands.
-    const gi = this.mapGoals.findIndex((g) => g.bx === chain[0].bx && g.by === chain[0].by);
-    if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
-    return true;
-  }
-
-  // One blind-exploration step: prefer ground nobody has stood on (shared
-  // visited - "尽量不走回头路"), don't immediately double back, and head toward
-  // the least-seen direction so the shared map keeps growing outward.
-  _agent2ExploreStep(racer, pool) {
-    const fresh = pool.filter((cell) => !this.agent2Visited.has(`${cell.fx},${cell.fy}`));
-    if (fresh.length) pool = fresh;
-
-    if (racer.previousCell) {
-      const notBack = pool.filter((cell) => cell.fx !== racer.previousCell.bx || cell.fy !== racer.previousCell.by);
-      if (notBack.length) pool = notBack;
-    }
-
-    const unseenAround = (cell) => [[1, 0], [-1, 0], [0, 1], [0, -1]]
-      .filter(([dx, dy]) => !this.agent2Sensed.has(`${cell.fx + dx},${cell.fy + dy}`)).length;
-    const most = Math.max(...pool.map(unseenAround));
-    pool = pool.filter((cell) => unseenAround(cell) === most);
-
-    return pool[Math.floor(Math.random() * pool.length)];
-  }
 
   // ---------------------------------------------------------------------
   // Camera, input, and the render loop (shared by both modes).
