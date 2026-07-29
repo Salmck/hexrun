@@ -50,20 +50,6 @@ export function agent2ChooseMove(game, racer) {
   const pool = DIRS
     .map(([dx, dy]) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
     .filter((cell) => game._mapCellAvailable(cell.fx, cell.fy, racer));
-  if (!pool.length) return null;
-
-  // Deadlock breaker. If this racer has been stuck for a long stretch (a jam
-  // the yield / chain-yield logic can't rotate out of), random-walk a handful
-  // of steps to shake the configuration loose, then re-plan.
-  if ((racer.idleTicks || 0) > 20) { racer.scatterSteps = 6; racer.idleTicks = 0; }
-  if ((racer.scatterSteps || 0) > 0) {
-    racer.scatterSteps -= 1;
-    racer.path = null;
-    game._updateMapPathDots(racer, null);
-    const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
-    const cands = fwd.length ? fwd : pool;
-    return cands[Math.floor(Math.random() * cands.length)];
-  }
 
   // Right next to a free goal? Step straight onto it and stop there.
   const adjGoal = pool.find((cell) => game._isMapGoal(cell.fx, cell.fy));
@@ -73,12 +59,19 @@ export function agent2ChooseMove(game, racer) {
   // sensed it. Until at least one is known, keep exploring.
   const knownGoals = game.mapGoals.filter((g) => game.agent2Sensed.has(`${g.bx},${g.by}`));
   if (knownGoals.length) {
-    // Once a goal is known, EVERY still-searching racer heads for the cluster,
-    // aiming at the nearest known goal whether or not someone is already
-    // stopped on it. Who ends up where is sorted by the yield on arrival.
+    // Once a goal is known, EVERY still-searching racer heads for the cluster.
+    // Aim at the nearest goal NOBODY is stopped on so queuing racers spread
+    // across free goals instead of all piling onto the same occupied one and
+    // fighting a boxed-in occupant (which is what jammed the endgame). Only if
+    // every known goal is already taken do we fall back to the nearest of them
+    // and let the arrival yield sort it out.
+    const isTaken = (g) => game.mapRacers.some(
+      (o) => o !== racer && o.status === 'reached' && o.bx === g.bx && o.by === g.by);
+    const freeGoals = knownGoals.filter((g) => !isTaken(g));
+    const candidates = freeGoals.length ? freeGoals : knownGoals;
     let target = null;
     let bestD = Infinity;
-    for (const g of knownGoals) {
+    for (const g of candidates) {
       const d = Math.abs(g.bx - racer.bx) + Math.abs(g.by - racer.by);
       if (d < bestD) { bestD = d; target = g; }
     }
@@ -112,18 +105,39 @@ export function agent2ChooseMove(game, racer) {
         // oscillation. The bumped racer re-plans straight back onto a free goal.
         agent2ForceYield(game, parked);
       }
+      // A racer on a live route NEVER scatters: it keeps its path (and thus its
+      // finishing priority) and leans on _tryClearWayFor to shuffle whoever
+      // holds the next cell out of the way - force-vacating a chain of solvers
+      // if need be, even when every immediate neighbour is occupied. It only
+      // WAITS (line stays up) when a racer even closer to finishing legitimately
+      // holds the cell this round, advancing the moment that clears. So a
+      // frontrunner wedged at the mouth of the goal cluster keeps pressing in
+      // instead of abandoning its route and drifting backward on a scatter.
       if (game._tryClearWayFor(racer, next)) return next;
-      // Only a racer even closer to its own goal holds the cell this round -
-      // WAIT (line stays up) rather than wandering off; advances once clear.
       return null;
     }
     // Target not reachable over sensed ground yet - keep exploring to open it
     // up (no route, so no line to show).
   }
-  // Not heading to a goal this round - drop any stale route so it counts as
-  // lowest priority and yields to racers that ARE following one.
+  // Not following a route this round (still exploring, or the target can't be
+  // reached over sensed ground yet). Drop any stale route so this racer counts
+  // as lowest priority and yields to racers that ARE finishing.
   racer.path = null;
   game._updateMapPathDots(racer, null);
+  if (!pool.length) return null;
+
+  // Deadlock breaker for the EXPLORATION phase only. A racer with no usable
+  // route to a goal that has been wedged for a long stretch random-walks a
+  // handful of steps to shake the configuration loose, then re-plans. Racers
+  // that DO have a route break jams through the yield above instead, so this
+  // never derails one that was about to finish.
+  if ((racer.idleTicks || 0) > 20) { racer.scatterSteps = 6; racer.idleTicks = 0; }
+  if ((racer.scatterSteps || 0) > 0) {
+    racer.scatterSteps -= 1;
+    const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
+    const cands = fwd.length ? fwd : pool;
+    return cands[Math.floor(Math.random() * cands.length)];
+  }
 
   return agent2ExploreStep(game, racer, pool);
 }
