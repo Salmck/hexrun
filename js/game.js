@@ -3,7 +3,7 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
-import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=82';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=83';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);

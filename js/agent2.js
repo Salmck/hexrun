@@ -104,7 +104,14 @@ export function agent2ChooseMove(game, racer) {
       // racer (and any behind it) along to the nearest empty goal, freeing this
       // cell for the arriver.
       const parked = game.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === next.fx && o.by === next.fy);
-      if (parked) agent2ChainYield(game, parked);
+      if (parked && !agent2ChainYield(game, parked) && (racer.idleTicks || 0) >= 3) {
+        // Chain-yield couldn't slide it cleanly this round (a link in the chain
+        // is mid-animation) and the arriver has already waited a few rounds -
+        // so bump the occupant off directly instead of letting the wait build
+        // up until the scatter kicks the arriver into a retreat/return
+        // oscillation. The bumped racer re-plans straight back onto a free goal.
+        agent2ForceYield(game, parked);
+      }
       if (game._tryClearWayFor(racer, next)) return next;
       // Only a racer even closer to its own goal holds the cell this round -
       // WAIT (line stays up) rather than wandering off; advances once clear.
@@ -193,6 +200,26 @@ function agent2ChainYield(game, parked) {
   // chain[0] is now empty - reset its marker to neutral until someone lands.
   const gi = game.mapGoals.findIndex((g) => g.bx === chain[0].bx && g.by === chain[0].by);
   if (gi >= 0) game.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+  return true;
+}
+
+// Last-resort yield when the clean chain-yield can't run (a link is
+// mid-animation). Bumps `parked` straight off its goal into any free
+// neighbour so the waiting arriver can take the cell now instead of livelocking
+// into a retreat. `parked` becomes a free solver again and re-plans back onto a
+// free goal (re-settling the moment it lands on one). Returns true if it moved.
+function agent2ForceYield(game, parked) {
+  if (parked.shape.isBusy() || parked.pendingDir) return false;
+  const dest = DIRS
+    .map(([dx, dy]) => ({ fx: parked.bx + dx, fy: parked.by + dy }))
+    .find((c) => game._mapCellAvailable(c.fx, c.fy, parked));
+  if (!dest) return false; // fully boxed in - nothing to do, arriver waits
+  // Release its goal: neutral marker, back to solving so it heads for a free one.
+  const gi = game.mapGoals.findIndex((g) => g.bx === parked.bx && g.by === parked.by);
+  if (gi >= 0) game.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+  parked.path = null;
+  parked.status = 'solving';
+  game._applyMapMove(parked, dest);
   return true;
 }
 
