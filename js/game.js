@@ -1402,13 +1402,12 @@ export class Game {
         if (d < bestD) { bestD = d; target = g; }
       }
 
-      // A* over the shared sensed-open map to the target, routing around OTHER
-      // racers stopped on goals but allowing the target cell itself.
-      const sensedOpen = (x, y) => {
-        if (x === target.bx && y === target.by) return this.agent2Sensed.has(`${x},${y}`);
-        return this.agent2Sensed.has(`${x},${y}`) && this.blockGrid.blockOpen(x, y) &&
-          !this.mapRacers.some((o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
-      };
+      // A* plans over the shared sensed map using WALLS ONLY - no racer,
+      // stationary or moving, is ever treated as an obstacle, so the line is
+      // never bent or held up by another object. Occupancy of the single next
+      // cell is the only thing resolved locally below (chain-yield for a racer
+      // stopped on a goal in the way, progress-based yield for a moving one).
+      const sensedOpen = (x, y) => this.agent2Sensed.has(`${x},${y}`) && this.blockGrid.blockOpen(x, y);
       const route = findPath(sensedOpen, this.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
       if (route && route.length >= 2) {
         // Publish how far this racer still has to go so _tryClearWayFor's
