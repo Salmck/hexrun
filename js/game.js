@@ -877,6 +877,10 @@ export class Game {
       next = this.agentGoalKnown ? this._chooseDiscoveredPathMove(racer) : this._chooseAgentExploreMove(racer);
     } else if (this.mapStrategy === 'agent2') {
       next = this._chooseAgent2Move(racer);
+      // Count consecutive rounds this racer couldn't move; a long streak means
+      // it's wedged in a jam the yield/chain-yield logic can't rotate out of.
+      // _chooseAgent2Move watches this and breaks the deadlock with a scatter.
+      if (!next) { racer.idleTicks = (racer.idleTicks || 0) + 1; return; }
     } else {
       next = this._choosePathMove(racer);
     }
@@ -885,6 +889,7 @@ export class Game {
   }
 
   _applyMapMove(racer, next) {
+    racer.idleTicks = 0; // it moved this round - not stuck
     const dx = next.fx - racer.bx;
     const dy = next.fy - racer.by;
     const dir = dx === 1 ? RIGHT : dx === -1 ? LEFT : dy === 1 ? BACKWARD : FORWARD;
@@ -1382,6 +1387,21 @@ export class Game {
       .map(({ dx, dy }) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
       .filter((cell) => this._mapCellAvailable(cell.fx, cell.fy, racer));
     if (!pool.length) return null;
+
+    // Deadlock breaker. If this racer has been stuck for a long stretch (a jam
+    // the yield / chain-yield logic can't rotate out of - a knot of racers all
+    // waiting on each other), random-walk a handful of steps to physically
+    // shake the configuration loose, then re-plan. Rare and short, so it
+    // doesn't disturb normal movement.
+    if ((racer.idleTicks || 0) > 20) { racer.scatterSteps = 6; racer.idleTicks = 0; }
+    if ((racer.scatterSteps || 0) > 0) {
+      racer.scatterSteps -= 1;
+      racer.path = null;
+      this._updateMapPathDots(racer, null);
+      const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
+      const cands = fwd.length ? fwd : pool;
+      return cands[Math.floor(Math.random() * cands.length)];
+    }
 
     // Right next to a free goal? Step straight onto it and stop there.
     const adjGoal = pool.find((cell) => this._isMapGoal(cell.fx, cell.fy));
