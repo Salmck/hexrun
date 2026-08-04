@@ -4,6 +4,7 @@ import { RollingShape } from './roller.js';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
+import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=1';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -127,14 +128,17 @@ export class Game {
   }
 
   toggleMapStrategy() {
-    const order = ['path', 'explore', 'agent', 'agent2'];
+    const order = ['path', 'explore', 'agent', 'agent2', 'agent3'];
     const previous = this.mapStrategy;
     this.mapStrategy = order[(order.indexOf(this.mapStrategy) + 1) % order.length];
     if (this.gameType === 'map') {
-      // agent2's one-goal-per-racer layout is a different map topology than
-      // every other strategy's single shared goal - crossing that boundary
-      // needs a full regeneration, not just clearing each racer's memory.
-      if ((previous === 'agent2') !== (this.mapStrategy === 'agent2')) {
+      // agent2 and agent3 each build a completely different map layout from
+      // every other strategy's single shared goal AND from each other
+      // (scattered cluster vs. separate cargo-lined goal lines) - crossing
+      // any of those boundaries needs a full regeneration, not just
+      // clearing each racer's memory.
+      const mapLayoutClass = (s) => (s === 'agent2' || s === 'agent3') ? s : 'shared';
+      if (mapLayoutClass(previous) !== mapLayoutClass(this.mapStrategy)) {
         this._teardownMapMode();
         this._setupMapMode();
         this._reportStats();
@@ -669,29 +673,44 @@ export class Game {
       this.cameraOrbit.elevation = 1.02;
       this.cameraOrbit.radius = 190;
     }
-    this.blockGrid = generateObstacleGrid(MAP_SIZE, MAP_SIZE, Math.random);
     this.agentGoalKnown = false;
     this.agentTrail = null;
-    const { blockOpen, blocksX, blocksY, openCells, obstacleComponents } = this.blockGrid;
     const isAgent2 = this.mapStrategy === 'agent2';
+    const isAgent3 = this.mapStrategy === 'agent3';
 
     // Agent mode 2 gets one goal per racer, scattered across the map (the
     // obstacle grid already guarantees every open cell is one connected
     // region, so any goal is reachable from anywhere - no special placement
-    // constraint is needed beyond spreading them out); every other strategy
-    // keeps the single shared goal nearest the map centre.
+    // constraint is needed beyond spreading them out); agent mode 3 instead
+    // carves several separate cargo-lined goal LINES into its own map, built
+    // by js/agent3.js; every other strategy keeps the single shared goal
+    // nearest the map centre on the plain generated obstacle field.
     let goalCells;
-    if (isAgent2) {
-      goalCells = pickScatteredGoals(this, openCells, this.racerCount);
+    if (isAgent3) {
+      this.blockGrid = agent3GenerateMap(MAP_SIZE, this.racerCount, Math.random);
+      this.mapGoals = this.blockGrid.goals;
+      goalCells = this.mapGoals.map((g) => ({ fx: g.bx, fy: g.by }));
+      // The generated map can be larger than the shared MAP_SIZE default
+      // when many small goal lines need room to stay >=10 cells apart -
+      // pull the camera back proportionally so the whole thing stays in view.
+      if (this.cameraOrbit) this.cameraOrbit.radius = 190 * (this.blockGrid.blocksX / MAP_SIZE);
     } else {
-      const center = { fx: (blocksX - 1) / 2, fy: (blocksY - 1) / 2 };
-      goalCells = [[...openCells].sort((a, b) =>
-        (Math.abs(a.fx - center.fx) + Math.abs(a.fy - center.fy)) -
-        (Math.abs(b.fx - center.fx) + Math.abs(b.fy - center.fy))
-      )[0]];
+      this.blockGrid = generateObstacleGrid(MAP_SIZE, MAP_SIZE, Math.random);
+      if (isAgent2) {
+        goalCells = pickScatteredGoals(this, this.blockGrid.openCells, this.racerCount);
+      } else {
+        const center = { fx: (this.blockGrid.blocksX - 1) / 2, fy: (this.blockGrid.blocksY - 1) / 2 };
+        goalCells = [[...this.blockGrid.openCells].sort((a, b) =>
+          (Math.abs(a.fx - center.fx) + Math.abs(a.fy - center.fy)) -
+          (Math.abs(b.fx - center.fx) + Math.abs(b.fy - center.fy))
+        )[0]];
+      }
+      this.mapGoals = goalCells.map((c) => ({ bx: c.fx, by: c.fy }));
     }
-    this.mapGoals = goalCells.map((c) => ({ bx: c.fx, by: c.fy }));
     this.mapGoal = this.mapGoals[0];
+    this.mapCargo = isAgent3 ? this.blockGrid.cargo : [];
+
+    const { blocksX, blocksY, openCells, obstacleComponents } = this.blockGrid;
 
     const starts = [];
     for (let i = 0; i < this.racerCount; i++) {
@@ -708,9 +727,11 @@ export class Game {
       starts.push({ fx: best.fx, fy: best.fy });
     }
 
-    // Agent mode 2's shared exploration state (visited + pooled vision) lives
-    // in js/agent2.js, along with the whole mode's movement AI.
+    // Agent modes 2 and 3's shared exploration state (visited + pooled
+    // vision) lives in their own module alongside the whole mode's movement
+    // AI - js/agent2.js and js/agent3.js respectively.
     if (isAgent2) agent2SetupState(this, starts);
+    if (isAgent3) agent3SetupState(this, starts);
 
     const cellSize = this.forwardStep;
     const blockStep = MAZE_RATIO * cellSize; // world distance between adjacent block centers
@@ -758,6 +779,24 @@ export class Game {
         }
       }
     });
+
+    // Agent mode 3's cargo crates: one type per goal line, rendered smaller
+    // and separately from the generic wall boxes above so they read as
+    // distinct set-dressing rather than more maze wall.
+    this.mapCargoMeshes = [];
+    if (this.mapCargo.length) {
+      const cargoSize = blockStep * 0.86;
+      const cargoHeight = wallHeight * 0.7;
+      const cargoGeo = new THREE.BoxGeometry(cargoSize, cargoHeight, cargoSize);
+      const cargoPalette = [0xdba13c, 0x4f8fd9];
+      const cargoMats = cargoPalette.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.55 }));
+      for (const c of this.mapCargo) {
+        const mesh = new THREE.Mesh(cargoGeo, cargoMats[c.kind % cargoMats.length]);
+        mesh.position.set(this._mapWorldX(c.bx), cargoHeight / 2, this._mapWorldZ(c.by));
+        this.scene.add(mesh);
+        this.mapCargoMeshes.push(mesh);
+      }
+    }
 
     const goalGeo = new THREE.CircleGeometry(cellSize * 0.32, 24);
     // In agent2 nobody owns a goal yet at setup time - ownership only exists
@@ -824,7 +863,7 @@ export class Game {
         status: 'solving',
         visitCounts: new Map([[`${start.fx},${start.fy}`, 1]]),
         trail: [{ fx: start.fx, fy: start.fy }],
-        assignedGoal: isAgent2 ? null : this.mapGoal,
+        assignedGoal: (isAgent2 || isAgent3) ? null : this.mapGoal,
         claimedGoal: null,
         pathColor,
         pathDots,
@@ -847,6 +886,8 @@ export class Game {
     this.mapWalls = [];
     for (const marker of this.mapGoalMarkers || []) this.scene.remove(marker);
     this.mapGoalMarkers = [];
+    for (const mesh of this.mapCargoMeshes || []) this.scene.remove(mesh);
+    this.mapCargoMeshes = [];
     for (const racer of (this.mapRacers || [])) {
       this.scene.remove(racer.pathDots);
       this.scene.remove(racer.pathGlow);
@@ -870,11 +911,11 @@ export class Game {
       next = this._chooseExplorationMove(racer);
     } else if (this.mapStrategy === 'agent') {
       next = this.agentGoalKnown ? this._chooseDiscoveredPathMove(racer) : this._chooseAgentExploreMove(racer);
-    } else if (this.mapStrategy === 'agent2') {
-      next = agent2ChooseMove(this, racer);
+    } else if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3') {
+      next = this.mapStrategy === 'agent2' ? agent2ChooseMove(this, racer) : agent3ChooseMove(this, racer);
       // Count consecutive rounds this racer couldn't move; a long streak means
       // it's wedged in a jam the yield/chain-yield logic can't rotate out of.
-      // agent2ChooseMove watches this and breaks the deadlock with a scatter.
+      // agent2/3ChooseMove watch this and break the deadlock with a scatter.
       if (!next) { racer.idleTicks = (racer.idleTicks || 0) + 1; return; }
     } else {
       next = this._choosePathMove(racer);
@@ -897,12 +938,13 @@ export class Game {
     racer.shape.startMove(dir);
     racer.pendingDir = dir;
 
-    if (this.mapStrategy === 'agent2') {
+    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3') {
       // Mark the arrived cell as covered ground in the shared record and sense
       // from the new spot (both shared). If it's a goal, the racer has found
       // one - it stops right there.
-      this.agent2Visited.add(`${racer.bx},${racer.by}`);
-      agent2Sense(this, racer);
+      const visited = this.mapStrategy === 'agent2' ? this.agent2Visited : this.agent3Visited;
+      visited.add(`${racer.bx},${racer.by}`);
+      if (this.mapStrategy === 'agent2') agent2Sense(this, racer); else agent3Sense(this, racer);
       if (this._isMapGoal(racer.bx, racer.by)) {
         racer.status = 'reached';
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
@@ -931,7 +973,7 @@ export class Game {
 
   _mapCellAvailable(x, y, racer) {
     if (!this.blockGrid.blockOpen(x, y)) return false;
-    if (this.mapStrategy === 'agent2') {
+    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3') {
       // Any cell another racer stands on is taken - including one that has
       // stopped on a goal, which is a permanent obstacle to everyone else.
       return !this.mapRacers.some((other) => other !== racer && other.bx === x && other.by === y);
@@ -1136,7 +1178,7 @@ export class Game {
 
   _updateMapPathDots(racer, path) {
     if (!racer.pathDots) return;
-    const showsDots = this.mapStrategy === 'path' || this.mapStrategy === 'agent' || this.mapStrategy === 'agent2';
+    const showsDots = this.mapStrategy === 'path' || this.mapStrategy === 'agent' || this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3';
     if (!showsDots || !path || path.length < 2) {
       racer.pathDots.count = 0;
       racer.pathGlow.count = 0;
