@@ -1055,25 +1055,23 @@ export class Game {
       const b = c.racerB.shape.group.position;
       c.mesh.position.set((a.x + b.x) / 2, this.apothem, (a.z + b.z) / 2);
     }
-    // Rigidly follow each dragged crate to its racer's own animated ground
-    // position at a constant horizontal offset - so it tracks the racer's
-    // real (slightly curved) rolling path and always lands exactly on the
-    // vacated goal cell - but give the crate its OWN explicit vertical hop
-    // synced to each tumble rather than reusing the racer's actual Y motion
-    // directly: the shape's own centre only rises a few percent of its own
-    // diameter as it tips over an edge, which reads fine on the shape itself
-    // (its dramatic 90-degree flip is what sells the roll) but is nowhere
-    // near visible on a crate several times its size that isn't rotating at
-    // all - the crate needs its own bigger, deliberate lift to read as
-    // "picked up by the roll" rather than sliding flat.
+    // Two different drags, one per cargo colour:
+    // - 'drag' (yellow, kind 0): stays flat on the ground, sliding along
+    //   with the racer's horizontal position only - never leaves the floor.
+    // - 'swing' (blue, kind 1): rigidly attached to the racer's centre by an
+    //   imagined rod, so as the racer's own orientation tumbles the crate
+    //   swings around the racer's CURRENT position with it - a rotation
+    //   about the racer, not a bob up and down in place.
     if (this._agent3CargoTweens.length) {
       this._agent3CargoTweens = this._agent3CargoTweens.filter((tw) => {
-        const p = tw.racer.shape.group.position;
         const shape = tw.racer.shape;
-        const hop = shape.phase === 'tumbling'
-          ? Math.sin(Math.min(1, shape.elapsed / shape.tumbleDuration) * Math.PI) * tw.liftAmplitude
-          : 0;
-        tw.mesh.position.set(p.x + tw.offsetX, tw.restY + hop, p.z + tw.offsetZ);
+        if (tw.mode === 'swing') {
+          const worldOffset = tw.localOffset.clone().applyQuaternion(shape.group.quaternion);
+          tw.mesh.position.copy(shape.group.position).add(worldOffset);
+        } else {
+          const p = shape.group.position;
+          tw.mesh.position.set(p.x + tw.offsetX, tw.restY, p.z + tw.offsetZ);
+        }
         return shape.isBusy() || tw.racer.pendingDir;
       });
     }
@@ -1135,14 +1133,28 @@ export class Game {
       const cargoIndex = this.mapCargo.findIndex((c) => c.goalBx === fromBx && c.goalBy === fromBy);
       if (cargoIndex < 0) continue;
       const mesh = this.mapCargoMeshes[cargoIndex];
-      this._agent3CargoTweens.push({
-        mesh,
-        racer,
-        offsetX: mesh.position.x - racer.shape.group.position.x,
-        offsetZ: mesh.position.z - racer.shape.group.position.z,
-        restY: mesh.position.y,
-        liftAmplitude: this.apothem * 0.9,
-      });
+      const kind = this.mapCargo[cargoIndex].kind;
+      if (kind === 1) {
+        // Blue: rigid rod to the racer's centre. Express the current
+        // world-space offset in the racer's OWN (rotating) local frame once,
+        // at the moment the roll starts - re-applying the racer's current
+        // orientation to that fixed local vector every frame is exactly
+        // "rotates with the racer, constant relative position", not a
+        // scripted bob.
+        const worldOffset0 = mesh.position.clone().sub(racer.shape.group.position);
+        const localOffset = worldOffset0.applyQuaternion(racer.shape.group.quaternion.clone().invert());
+        this._agent3CargoTweens.push({ mesh, racer, mode: 'swing', localOffset });
+      } else {
+        // Yellow: plain flat drag, never leaves the ground.
+        this._agent3CargoTweens.push({
+          mesh,
+          racer,
+          mode: 'drag',
+          offsetX: mesh.position.x - racer.shape.group.position.x,
+          offsetZ: mesh.position.z - racer.shape.group.position.z,
+          restY: mesh.position.y,
+        });
+      }
     }
   }
 
