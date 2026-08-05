@@ -1039,13 +1039,15 @@ export class Game {
   }
 
   // Per-frame upkeep for agent mode 3's finish celebration: fires it once
-  // every racer has reached a goal, then keeps each connector tracking its
-  // pair's live positions and advances every cargo slide while it plays out.
+  // every racer has reached a goal AND fully settled (not just logically
+  // 'reached' - still mid-tumble into that very cell would visibly cut the
+  // arrival animation short), then keeps each connector tracking its pair's
+  // live positions and rides each dragged crate along with its racer.
   _updateAgent3Celebration() {
     if (!this._agent3CelebrationStarted) {
-      if (this.mapRacers.length && this.mapRacers.every((r) => r.status === 'reached')) {
-        this._startAgent3Celebration();
-      }
+      const allSettled = this.mapRacers.length &&
+        this.mapRacers.every((r) => r.status === 'reached' && !r.shape.isBusy() && !r.pendingDir);
+      if (allSettled) this._startAgent3Celebration();
       return;
     }
     for (const c of this._agent3Connectors) {
@@ -1053,22 +1055,20 @@ export class Game {
       const b = c.racerB.shape.group.position;
       c.mesh.position.set((a.x + b.x) / 2, this.apothem, (a.z + b.z) / 2);
     }
+    // Rigidly follow each dragged crate to its racer's own animated position
+    // (offset held constant) rather than tweening it along a flat line - the
+    // racer's own tumble arc already lifts and settles its centre as it
+    // rolls, and riding that same motion at a fixed offset is exactly what
+    // makes the crate read as pulled along by the roll instead of sliding.
     if (this._agent3CargoTweens.length) {
-      const now = performance.now();
       this._agent3CargoTweens = this._agent3CargoTweens.filter((tw) => {
-        const t = Math.min(1, (now - tw.start) / tw.duration);
-        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-        tw.mesh.position.set(
-          tw.fromX + (tw.toX - tw.fromX) * eased,
-          tw.mesh.position.y,
-          tw.fromZ + (tw.toZ - tw.fromZ) * eased
-        );
-        return t < 1;
+        tw.mesh.position.copy(tw.racer.shape.group.position).add(tw.offset);
+        return tw.racer.shape.isBusy() || tw.racer.pendingDir;
       });
     }
   }
 
-  // Welds every completed goal line into one rigid body (a connector bar
+  // Welds every completed goal line into one rigid body (a connector rod
   // between each 4-adjacent pair of its racers) and sends the whole line
   // rolling one cell toward its own open/entrance side in lockstep, dragging
   // any cargo paired with a vacated goal cell out of its nook along with it.
@@ -1081,9 +1081,8 @@ export class Game {
 
     const cellSize = this.forwardStep;
     const blockStep = MAZE_RATIO * cellSize;
-    const barThickness = cellSize * 0.14;
-    const barHeight = this.apothem * 0.4;
-    const barMat = new THREE.MeshStandardMaterial({ color: 0xf0c419, roughness: 0.35, metalness: 0.4 });
+    const barRadius = cellSize * 0.07;
+    const barMat = new THREE.MeshStandardMaterial({ color: 0x9aa0aa, roughness: 0.55, metalness: 0.2 });
     for (const g of this.mapGoals) {
       for (const [dx, dy] of [[1, 0], [0, 1]]) { // only +x/+y so each pair is only ever built once
         const other = goalAt(g.bx + dx, g.by + dy);
@@ -1091,17 +1090,24 @@ export class Game {
         const racerA = racerAt(g.bx, g.by);
         const racerB = racerAt(other.bx, other.by);
         if (!racerA || !racerB) continue;
-        const geo = dx
-          ? new THREE.BoxGeometry(blockStep * 0.8, barHeight, barThickness)
-          : new THREE.BoxGeometry(barThickness, barHeight, blockStep * 0.8);
+        const geo = new THREE.CylinderGeometry(barRadius, barRadius, blockStep * 0.8, 12);
         const mesh = new THREE.Mesh(geo, barMat);
+        // CylinderGeometry stands upright (its length runs along Y) by
+        // default - tip it onto its side along whichever axis this pair is
+        // adjacent on.
+        if (dx) mesh.rotation.z = Math.PI / 2;
+        if (dy) mesh.rotation.x = Math.PI / 2;
         mesh.position.set(this._mapWorldX(g.bx + dx / 2), this.apothem, this._mapWorldZ(g.by + dy / 2));
         this.scene.add(mesh);
         this._agent3Connectors.push({ mesh, racerA, racerB });
       }
     }
 
-    const moveDuration = 4 * this.shape.tumbleDuration + 2 * this.shape.pauseBetween;
+    // Much slower than any normal-play speed setting - a deliberate,
+    // ceremonial roll rather than more gameplay movement.
+    const CELEBRATION_TUMBLE_DURATION = 480;
+    const CELEBRATION_PAUSE_BETWEEN = 160;
+
     for (const racer of this.mapRacers.slice()) {
       const goal = goalAt(racer.bx, racer.by);
       if (!goal || !goal.openDir) continue;
@@ -1110,21 +1116,16 @@ export class Game {
       const dir = dx === 1 ? RIGHT : dx === -1 ? LEFT : dy === 1 ? BACKWARD : FORWARD;
       racer.bx += dx;
       racer.by += dy;
+      racer.shape.tumbleDuration = CELEBRATION_TUMBLE_DURATION;
+      racer.shape.pauseBetween = CELEBRATION_PAUSE_BETWEEN;
       racer.shape.startMove(dir);
       racer.pendingDir = dir;
 
       const cargoIndex = this.mapCargo.findIndex((c) => c.goalBx === fromBx && c.goalBy === fromBy);
       if (cargoIndex < 0) continue;
       const mesh = this.mapCargoMeshes[cargoIndex];
-      this._agent3CargoTweens.push({
-        mesh,
-        fromX: mesh.position.x,
-        fromZ: mesh.position.z,
-        toX: this._mapWorldX(fromBx),
-        toZ: this._mapWorldZ(fromBy),
-        start: performance.now(),
-        duration: moveDuration,
-      });
+      const offset = mesh.position.clone().sub(racer.shape.group.position);
+      this._agent3CargoTweens.push({ mesh, racer, offset });
     }
   }
 
