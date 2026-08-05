@@ -1115,14 +1115,14 @@ export class Game {
     }
 
     // Much slower than any normal-play speed setting - a deliberate,
-    // ceremonial roll rather than more gameplay movement. A racer paired
-    // with blue cargo instead gets a quick half-cell flick - one startMove
-    // (two tumbles) at high speed, not the full two-startMove/four-tumble
-    // block move - so it doesn't need its own second half queued.
+    // ceremonial roll rather than more gameplay movement. Every racer in a
+    // welded line tumbles at this SAME tempo, so the whole connected group
+    // reads as moving together - a racer paired with blue cargo just does
+    // one startMove (two tumbles, a half-cell flick) instead of two, so it
+    // covers half the distance and naturally finishes first, rather than
+    // rushing ahead of its still-rolling neighbours at a different speed.
     const CELEBRATION_TUMBLE_DURATION = 480;
     const CELEBRATION_PAUSE_BETWEEN = 160;
-    const CELEBRATION_FLICK_TUMBLE_DURATION = 30;
-    const CELEBRATION_FLICK_PAUSE_BETWEEN = 5;
 
     for (const racer of this.mapRacers.slice()) {
       const goal = goalAt(racer.bx, racer.by);
@@ -1134,18 +1134,17 @@ export class Game {
       const cargoIndex = this.mapCargo.findIndex((c) => c.goalBx === fromBx && c.goalBy === fromBy);
       const kind = cargoIndex >= 0 ? this.mapCargo[cargoIndex].kind : null;
 
+      racer.shape.tumbleDuration = CELEBRATION_TUMBLE_DURATION;
+      racer.shape.pauseBetween = CELEBRATION_PAUSE_BETWEEN;
       if (kind === 1) {
-        // Blue: fast half-cell flick. bx/by deliberately NOT advanced - the
+        // Blue: half-cell flick, same tempo as everyone else - just one
+        // startMove instead of two. bx/by deliberately NOT advanced - the
         // racer only physically reaches the halfway point, never the next
         // cell's true centre.
-        racer.shape.tumbleDuration = CELEBRATION_FLICK_TUMBLE_DURATION;
-        racer.shape.pauseBetween = CELEBRATION_FLICK_PAUSE_BETWEEN;
         racer.shape.startMove(dir);
       } else {
         racer.bx += dx;
         racer.by += dy;
-        racer.shape.tumbleDuration = CELEBRATION_TUMBLE_DURATION;
-        racer.shape.pauseBetween = CELEBRATION_PAUSE_BETWEEN;
         racer.shape.startMove(dir);
         racer.pendingDir = dir;
       }
