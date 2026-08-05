@@ -744,10 +744,33 @@ export class Game {
     const maxZ = this._mapWorldZ(blocksY - 1) + blockStep / 2;
 
     const groundGeo = new THREE.PlaneGeometry(maxX - minX, maxZ - minZ);
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: 0xa3aab8,
-      roughness: 0.95,
-    });
+    let groundMat;
+    if (isAgent3) {
+      // Agent mode 3's "explored map" highlight is painted directly onto
+      // the ground's own texture (one canvas cell per block cell) rather
+      // than a second overlapping mesh at a slightly different height -
+      // two near-coplanar transparent surfaces fighting over draw order as
+      // the camera moves is exactly what caused it to flicker, and z-fixing
+      // it with a bigger offset would just be papering over the same
+      // structural problem. A single surface can't fight itself.
+      const px = 6; // canvas pixels per block cell - plenty crisp, tiny texture
+      const canvas = document.createElement('canvas');
+      canvas.width = blocksX * px;
+      canvas.height = blocksY * px;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#a3aab8';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.magFilter = THREE.NearestFilter;
+      texture.minFilter = THREE.NearestFilter;
+      this._mapExploredCtx = ctx;
+      this._mapExploredTexture = texture;
+      this._mapExploredPx = px;
+      groundMat = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.95 });
+    } else {
+      this._mapExploredCtx = null;
+      groundMat = new THREE.MeshStandardMaterial({ color: 0xa3aab8, roughness: 0.95 });
+    }
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
     ground.position.set((minX + maxX) / 2, 0, (minZ + maxZ) / 2);
@@ -795,24 +818,6 @@ export class Game {
         this.scene.add(mesh);
         this.mapCargoMeshes.push(mesh);
       }
-    }
-
-    // Agent mode 3's shared "explored map" highlight: a subtly brighter tile
-    // painted the instant any racer's shared vision first reaches a cell (see
-    // js/agent3.js's markSensed -> game._markMapExplored), so the swarm's
-    // pooled knowledge of the map is visible at a glance, not just implied.
-    this._mapExploredCount = 0;
-    if (isAgent3) {
-      const exploredGeo = new THREE.PlaneGeometry(blockStep * 0.96, blockStep * 0.96);
-      const exploredMat = new THREE.MeshBasicMaterial({
-        color: 0xeef3f9, transparent: true, opacity: 0.4, depthWrite: false,
-      });
-      this.mapExploredMesh = new THREE.InstancedMesh(exploredGeo, exploredMat, blocksX * blocksY);
-      this.mapExploredMesh.count = 0;
-      this.mapExploredMesh.frustumCulled = false;
-      this.scene.add(this.mapExploredMesh);
-    } else {
-      this.mapExploredMesh = null;
     }
 
     const goalGeo = new THREE.CircleGeometry(cellSize * 0.32, 24);
@@ -905,11 +910,10 @@ export class Game {
     this.mapGoalMarkers = [];
     for (const mesh of this.mapCargoMeshes || []) this.scene.remove(mesh);
     this.mapCargoMeshes = [];
-    if (this.mapExploredMesh) {
-      this.scene.remove(this.mapExploredMesh);
-      this.mapExploredMesh.geometry.dispose();
-      this.mapExploredMesh.material.dispose();
-      this.mapExploredMesh = null;
+    if (this._mapExploredTexture) {
+      this._mapExploredTexture.dispose();
+      this._mapExploredTexture = null;
+      this._mapExploredCtx = null;
     }
     for (const racer of (this.mapRacers || [])) {
       this.scene.remove(racer.pathDots);
@@ -1006,22 +1010,17 @@ export class Game {
     return this.mapGoals.some((g) => g.bx === x && g.by === y);
   }
 
-  // Paints one more tile onto the agent-3 "explored map" highlight the first
-  // time a cell enters anyone's shared vision. Appends one instance rather
-  // than rebuilding the whole set each call, so this is O(1) per newly-seen
-  // cell, not O(explored so far).
+  // Brightens one cell of the agent-3 "explored map" highlight the first
+  // time it enters anyone's shared vision, by painting directly onto the
+  // ground's own texture rather than adding a second overlapping surface -
+  // a single ground mesh can't z-fight with itself, and a canvas fillRect
+  // per newly-seen cell is cheap (this only ever runs once per cell, ever).
   _markMapExplored(x, y) {
-    if (!this.mapExploredMesh) return;
-    const i = this._mapExploredCount++;
-    const matrix = new THREE.Matrix4();
-    matrix.compose(
-      new THREE.Vector3(this._mapWorldX(x), 0.015, this._mapWorldZ(y)),
-      new THREE.Quaternion().setFromAxisAngle(PITCH_AXIS, -Math.PI / 2),
-      new THREE.Vector3(1, 1, 1)
-    );
-    this.mapExploredMesh.setMatrixAt(i, matrix);
-    this.mapExploredMesh.count = i + 1;
-    this.mapExploredMesh.instanceMatrix.needsUpdate = true;
+    if (!this._mapExploredCtx) return;
+    const px = this._mapExploredPx;
+    this._mapExploredCtx.fillStyle = '#eef3f9';
+    this._mapExploredCtx.fillRect(x * px, y * px, px, px);
+    this._mapExploredTexture.needsUpdate = true;
   }
 
   _mapCellAvailable(x, y, racer) {
