@@ -459,10 +459,17 @@ function shuffleIndices(n) {
 // the line), the rest become plain forced wall - so the barrier reads as
 // solid with crates set into it, never a stray open gap next to a crate.
 // Each crate's outward-facing cell (one further out) is forced closed too,
-// so no crate ever backs onto open ground either. The opposite side's
-// immediate neighbour of every goal cell is forced OPEN, so that whole side
-// is clear approach ground.
-function carveCargoAndEmptySide(grid, width, height, line, cargoList) {
+// so no crate ever backs onto open ground either.
+//
+// The opposite (entrance) side is forced OPEN for a yellow line, exactly as
+// before - clear approach ground. For a BLUE line it's forced CLOSED
+// instead, built up into a solid, wall-height "platform" (platformList) -
+// the racer never actually reaches that cell during the finish celebration
+// (its blue-cargo flick only ever covers half the distance to it, by
+// design - see game.js's _startAgent3Celebration), so the platform is safe
+// to butt right up against the goal with no special-cased collision check
+// needed at that point.
+function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformList) {
   const n = line.cells.length;
   const perpPair = line.horizontal ? [[0, -1], [0, 1]] : [[-1, 0], [1, 0]];
   const side = Math.random() < 0.5 ? perpPair[0] : perpPair[1];
@@ -479,13 +486,21 @@ function carveCargoAndEmptySide(grid, width, height, line, cargoList) {
   const cargoCount = maxCargo > 0 ? 1 + Math.floor(Math.random() * maxCargo) : 0;
   const cargoIdxs = new Set(shuffleIndices(n).slice(0, cargoCount));
   const kind = Math.random() < 0.5 ? 0 : 1;
+  line.kind = kind;
 
   for (let i = 0; i < n; i++) {
     const cell = line.cells[i];
     grid[cell.fy][cell.fx] = true; // goal cell itself is always walkable
 
     const ex = cell.fx + odx, ey = cell.fy + ody;
-    if (inBounds(ex, ey, width, height)) grid[ey][ex] = true; // empty side, forced open
+    if (inBounds(ex, ey, width, height)) {
+      if (kind === 1) {
+        grid[ey][ex] = false; // blue line: entrance side becomes a solid platform
+        platformList.push({ bx: ex, by: ey, groupId: line.groupId });
+      } else {
+        grid[ey][ex] = true; // yellow line: entrance side stays clear approach ground
+      }
+    }
 
     const wx = cell.fx + pdx, wy = cell.fy + pdy;
     if (!inBounds(wx, wy, width, height)) continue;
@@ -521,16 +536,16 @@ function isSingleComponent(grid, width, height, openCells) {
 }
 
 // Groups 4-connected closed cells into wall components for rendering, the
-// same way generateObstacleGrid does internally - but skipping cargo cells,
-// which are rendered separately as their own smaller, tinted crates rather
-// than full-size generic wall boxes.
-function computeObstacleComponents(grid, width, height, cargoSet) {
+// same way generateObstacleGrid does internally - but skipping cargo cells
+// and platform cells, which are rendered separately (smaller tinted crates,
+// full-height flat "platforms") rather than as full-size generic wall boxes.
+function computeObstacleComponents(grid, width, height, cargoSet, platformSet) {
   const seen = new Set();
   const components = [];
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
       const k = `${x},${y}`;
-      if (grid[y][x] || seen.has(k) || cargoSet.has(k)) continue;
+      if (grid[y][x] || seen.has(k) || cargoSet.has(k) || platformSet.has(k)) continue;
       const component = [];
       const queue = [{ x, y }];
       seen.add(k);
@@ -540,7 +555,7 @@ function computeObstacleComponents(grid, width, height, cargoSet) {
         for (const [dx, dy] of DIRS) {
           const nx = cur.x + dx, ny = cur.y + dy;
           const nk = `${nx},${ny}`;
-          if (nx <= 0 || ny <= 0 || nx >= width - 1 || ny >= height - 1 || grid[ny][nx] || seen.has(nk) || cargoSet.has(nk)) continue;
+          if (nx <= 0 || ny <= 0 || nx >= width - 1 || ny >= height - 1 || grid[ny][nx] || seen.has(nk) || cargoSet.has(nk) || platformSet.has(nk)) continue;
           seen.add(nk);
           queue.push({ x: nx, y: ny });
         }
@@ -577,20 +592,22 @@ export function agent3GenerateMap(baseSize, racerCount, rng = Math.random) {
     if (!ok) continue;
 
     const cargo = [];
-    for (const line of lines) carveCargoAndEmptySide(grid, size, size, line, cargo);
+    const platforms = [];
+    for (const line of lines) carveCargoAndEmptySide(grid, size, size, line, cargo, platforms);
 
     const openCells = [];
     for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (grid[y][x]) openCells.push({ fx: x, fy: y });
     if (!isSingleComponent(grid, size, size, openCells)) continue;
 
     const cargoSet = new Set(cargo.map((c) => `${c.bx},${c.by}`));
-    const obstacleComponents = computeObstacleComponents(grid, size, size, cargoSet);
+    const platformSet = new Set(platforms.map((p) => `${p.bx},${p.by}`));
+    const obstacleComponents = computeObstacleComponents(grid, size, size, cargoSet, platformSet);
     const blockOpen = (x, y) => inBounds(x, y, size, size) && grid[y][x];
 
     const goals = [];
     for (const line of lines) for (const c of line.cells) goals.push({ bx: c.fx, by: c.fy, groupId: line.groupId, openDir: line.openDir });
 
-    return { blocksX: size, blocksY: size, blockOpen, openCells, obstacleComponents, goals, cargo };
+    return { blocksX: size, blocksY: size, blockOpen, openCells, obstacleComponents, goals, cargo, platforms };
   }
   throw new Error('agent3: failed to generate a valid goal-line layout after many attempts');
 }

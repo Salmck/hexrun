@@ -4,7 +4,7 @@ import { RollingShape } from './roller.js';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
-import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=5';
+import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=6';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -709,6 +709,7 @@ export class Game {
     }
     this.mapGoal = this.mapGoals[0];
     this.mapCargo = isAgent3 ? this.blockGrid.cargo : [];
+    this.mapPlatforms = isAgent3 ? this.blockGrid.platforms : [];
     // Agent mode 3's one-time, purely cosmetic finish celebration: once every
     // racer has reached a goal, every completed line welds itself into one
     // rigid body (a connector between each adjacent pair) and rolls together
@@ -813,18 +814,46 @@ export class Game {
 
     // Agent mode 3's cargo crates: one type per goal line, rendered smaller
     // and separately from the generic wall boxes above so they read as
-    // distinct set-dressing rather than more maze wall.
+    // distinct set-dressing rather than more maze wall. Positioned flush
+    // against the edge of their own cell nearest the goal, rather than at
+    // their cell's centre, so they read as leaning right up against the
+    // goal line instead of floating in the middle of their own square.
     this.mapCargoMeshes = [];
     if (this.mapCargo.length) {
       const cargoEdge = blockStep * 0.5; // a true cube, clearly smaller than a full cell
       const cargoGeo = new THREE.BoxGeometry(cargoEdge, cargoEdge, cargoEdge);
       const cargoPalette = [0xdba13c, 0x4f8fd9];
       const cargoMats = cargoPalette.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.55 }));
+      const edgeOffset = blockStep / 2 - cargoEdge / 2;
       for (const c of this.mapCargo) {
         const mesh = new THREE.Mesh(cargoGeo, cargoMats[c.kind % cargoMats.length]);
-        mesh.position.set(this._mapWorldX(c.bx), cargoEdge / 2, this._mapWorldZ(c.by));
+        const px = c.bx - c.goalBx; // unit vector from the goal toward the cargo cell
+        const py = c.by - c.goalBy;
+        mesh.position.set(
+          this._mapWorldX(c.bx) - px * edgeOffset,
+          cargoEdge / 2,
+          this._mapWorldZ(c.by) - py * edgeOffset
+        );
         this.scene.add(mesh);
         this.mapCargoMeshes.push(mesh);
+      }
+    }
+
+    // Agent mode 3's blue-line "platforms": the entrance side of a blue
+    // line is a solid, wall-height block instead of open approach ground
+    // (see agent3.js's carveCargoAndEmptySide) - styled like the generic
+    // walls above since blockGrid.blockOpen already reports these cells as
+    // closed, so they block movement identically without any extra
+    // collision-handling code.
+    this.mapPlatformMeshes = [];
+    if (this.mapPlatforms.length) {
+      const platformGeo = new THREE.BoxGeometry(blockStep * 0.98, wallHeight, blockStep * 0.98);
+      const platformMat = new THREE.MeshStandardMaterial({ color: wallPalette[0], roughness: 0.86 });
+      for (const p of this.mapPlatforms) {
+        const mesh = new THREE.Mesh(platformGeo, platformMat);
+        mesh.position.set(this._mapWorldX(p.bx), wallHeight / 2, this._mapWorldZ(p.by));
+        this.scene.add(mesh);
+        this.mapPlatformMeshes.push(mesh);
       }
     }
 
@@ -918,6 +947,8 @@ export class Game {
     this.mapGoalMarkers = [];
     for (const mesh of this.mapCargoMeshes || []) this.scene.remove(mesh);
     this.mapCargoMeshes = [];
+    for (const mesh of this.mapPlatformMeshes || []) this.scene.remove(mesh);
+    this.mapPlatformMeshes = [];
     if (this._mapExploredTexture) {
       this._mapExploredTexture.dispose();
       this._mapExploredTexture = null;
