@@ -41,8 +41,19 @@ export function agent3SetupState(game, starts) {
 }
 
 export function agent3Sense(game, racer) {
-  game.agent3Sensed.add(`${racer.bx},${racer.by}`);
-  for (const [dx, dy] of DIRS) game.agent3Sensed.add(`${racer.bx + dx},${racer.by + dy}`);
+  markSensed(game, racer.bx, racer.by);
+  for (const [dx, dy] of DIRS) markSensed(game, racer.bx + dx, racer.by + dy);
+}
+
+// Records one cell as newly seen and, the first time only, tells game.js to
+// paint the "explored" highlight there - a per-cell flag rather than a
+// per-frame redraw, so lighting up the shared map costs nothing beyond the
+// one instant a cell first enters anyone's vision.
+function markSensed(game, x, y) {
+  const k = `${x},${y}`;
+  if (game.agent3Sensed.has(k)) return;
+  game.agent3Sensed.add(k);
+  if (game._markMapExplored) game._markMapExplored(x, y);
 }
 
 // --------------------------------------------------------------------------
@@ -58,6 +69,21 @@ export function agent3ChooseMove(game, racer) {
 
   const adjGoal = pool.find((cell) => game._isMapGoal(cell.fx, cell.fy));
   if (adjGoal) return adjGoal;
+
+  // Deadlock/congestion breaker, checked first so it actually gets to run
+  // for the several ticks it's meant to last: a racer stuck despite having
+  // a live route (see the no-progress tracking below) sets this, and it
+  // needs to take priority over route-following on the very next ticks too
+  // - otherwise a fresh A* replan just re-finds the same jammed route
+  // immediately and the flag never gets consumed.
+  if ((racer.scatterSteps || 0) > 0 && pool.length) {
+    racer.scatterSteps -= 1;
+    racer.path = null;
+    game._updateMapPathDots(racer, null);
+    const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
+    const cands = fwd.length ? fwd : pool;
+    return cands[Math.floor(Math.random() * cands.length)];
+  }
 
   const knownGoals = game.mapGoals.filter((g) => game.agent3Sensed.has(`${g.bx},${g.by}`));
   const isTaken = (g) => game.mapRacers.some(
@@ -79,7 +105,57 @@ export function agent3ChooseMove(game, racer) {
       if (d < bestD) { bestD = d; target = g; }
     }
 
-    const sensedOpen = (x, y) => game.agent3Sensed.has(`${x},${y}`) && game.blockGrid.blockOpen(x, y);
+    // Track real progress toward `target`, separately from idleTicks (which
+    // only catches a racer that couldn't move AT ALL). A racer wedged in a
+    // tight multi-racer knot can keep successfully taking a step most ticks
+    // - resetting idleTicks every time via game._applyMapMove - while net
+    // distance to its own target never actually improves, shuffling
+    // sideways within the same pocket forever. That never trips the
+    // idle-based scatter breaker below, so it's tracked here instead.
+    const distToTarget = Math.abs(target.bx - racer.bx) + Math.abs(target.by - racer.by);
+    const targetKey = `${target.bx},${target.by}`;
+    if (racer._progressTargetKey === targetKey && distToTarget >= (racer._progressDist ?? Infinity)) {
+      racer.noProgressTicks = (racer.noProgressTicks || 0) + 1;
+    } else {
+      racer.noProgressTicks = 0;
+    }
+    racer._progressTargetKey = targetKey;
+    racer._progressDist = distToTarget;
+    if ((racer.noProgressTicks || 0) > 40) {
+      // Genuinely stuck despite having a route - drop it and let the
+      // scatter check at the top of the function take over for the next
+      // several ticks, exactly like a racer that never found a route at
+      // all, so the tight knot it's wedged in gets a real chance to shake
+      // loose instead of shuffling in place forever.
+      racer.noProgressTicks = 0;
+      racer.scatterSteps = 5; // one step consumed right here
+      racer.path = null;
+      game._updateMapPathDots(racer, null);
+      const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
+      const cands = fwd.length ? fwd : pool;
+      return cands.length ? cands[Math.floor(Math.random() * cands.length)] : null;
+    }
+
+    // A* plans over sensed WALLS only - except a cell held by a settled
+    // racer on a DIFFERENT goal line is excluded too. Evicting such a racer
+    // has nowhere good to send it (its own line isn't the one this racer is
+    // entering), so it would immediately want its old cell back the moment
+    // this racer moves off it - the two then swap that one cell back and
+    // forth forever. Excluding it here instead means A* simply never plans
+    // through it in the first place: it finds whatever real alternate route
+    // exists over currently sensed ground, or (if none is known yet) comes
+    // back null and this racer goes exploring instead - which resolves
+    // itself the instant enough of the map is sensed to reveal a bypass, no
+    // timer or retry bookkeeping needed. A racer queueing to enter its OWN
+    // target's line is unaffected - chain-yield/force-yield below still
+    // handle that shuffle exactly as before.
+    const sensedOpen = (x, y) => {
+      if (!game.agent3Sensed.has(`${x},${y}`) || !game.blockGrid.blockOpen(x, y)) return false;
+      const occ = game.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
+      if (!occ) return true;
+      const occGoal = game.mapGoals.find((g) => g.bx === x && g.by === y);
+      return !occGoal || occGoal.groupId === target.groupId;
+    };
     const route = findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
     if (route && route.length >= 2) {
       racer.path = route;
@@ -100,8 +176,10 @@ export function agent3ChooseMove(game, racer) {
   game._updateMapPathDots(racer, null);
   if (!pool.length) return null;
 
-  // Deadlock breaker for the exploration phase only - a racer following a
-  // live route never scatters (see agent2.js for the full rationale).
+  // Deadlock breaker for a racer with no usable route at all (a route-
+  // following racer that's merely stuck gets its own no-progress trigger
+  // above instead, which won't false-fire on a frontrunner legitimately
+  // waiting its turn near a goal - see agent2.js for that rationale).
   if ((racer.idleTicks || 0) > 20) { racer.scatterSteps = 6; racer.idleTicks = 0; }
   if ((racer.scatterSteps || 0) > 0) {
     racer.scatterSteps -= 1;
@@ -115,8 +193,27 @@ export function agent3ChooseMove(game, racer) {
 
 function agent3ExploreStep(game, racer, pool) {
   const fresh = pool.filter((cell) => !game.agent3Visited.has(`${cell.fx},${cell.fy}`));
-  if (fresh.length) pool = fresh;
+  if (fresh.length) return pickTowardUnseen(game, racer, fresh);
 
+  // Every immediate neighbour here is already-covered ground - a true local
+  // dead end (or a fully-explored pocket). The greedy "most unseen around"
+  // rule has nothing to prefer among already-visited cells, so left on its
+  // own it just wanders the covered ground at random until luck carries it
+  // back out. Instead, actively route to the nearest FRONTIER cell - open,
+  // sensed ground that still has at least one unsensed neighbour, i.e. the
+  // nearest actual edge of the known map - and follow that route straight
+  // back out, like a proper depth-first-search backtrack.
+  const route = findNearestFrontierRoute(game, racer);
+  if (route && route.length >= 2) {
+    const next = route[1];
+    if (game._mapCellAvailable(next.fx, next.fy, racer)) return next;
+  }
+  // No known frontier left to route to (or it's momentarily blocked) - fall
+  // back to the plain avoid-doubling-back walk over covered ground.
+  return pickTowardUnseen(game, racer, pool);
+}
+
+function pickTowardUnseen(game, racer, pool) {
   if (racer.previousCell) {
     const notBack = pool.filter((cell) => cell.fx !== racer.previousCell.bx || cell.fy !== racer.previousCell.by);
     if (notBack.length) pool = notBack;
@@ -128,6 +225,35 @@ function agent3ExploreStep(game, racer, pool) {
   pool = pool.filter((cell) => unseenAround(cell) === most);
 
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// BFS over sensed-open ground from the racer's own cell, stopping at the
+// first cell that still has an unsensed neighbour - the nearest point where
+// the shared known map actually ends - then A*-routes there over that same
+// sensed ground. Cheap: only ever called once the immediate neighbourhood is
+// fully covered, not on every tick.
+function findNearestFrontierRoute(game, racer) {
+  const sensedOpen = (x, y) => game.agent3Sensed.has(`${x},${y}`) && game.blockGrid.blockOpen(x, y);
+  const isFrontier = (x, y) => DIRS.some(([dx, dy]) => !game.agent3Sensed.has(`${x + dx},${y + dy}`));
+  const key = (x, y) => `${x},${y}`;
+  const seen = new Set([key(racer.bx, racer.by)]);
+  const queue = [{ fx: racer.bx, fy: racer.by }];
+  let head = 0;
+  let target = null;
+  while (head < queue.length) {
+    const cur = queue[head++];
+    if (!(cur.fx === racer.bx && cur.fy === racer.by) && isFrontier(cur.fx, cur.fy)) { target = cur; break; }
+    for (const [dx, dy] of DIRS) {
+      const nx = cur.fx + dx, ny = cur.fy + dy;
+      if (!sensedOpen(nx, ny)) continue;
+      const k = key(nx, ny);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      queue.push({ fx: nx, fy: ny });
+    }
+  }
+  if (!target) return null;
+  return findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, target);
 }
 
 // BFS chain-yield within one goal line's 4-connected run (lines are >=10

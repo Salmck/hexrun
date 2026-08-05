@@ -4,7 +4,7 @@ import { RollingShape } from './roller.js';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
-import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=1';
+import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=4';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -785,17 +785,34 @@ export class Game {
     // distinct set-dressing rather than more maze wall.
     this.mapCargoMeshes = [];
     if (this.mapCargo.length) {
-      const cargoSize = blockStep * 0.86;
-      const cargoHeight = wallHeight * 0.7;
-      const cargoGeo = new THREE.BoxGeometry(cargoSize, cargoHeight, cargoSize);
+      const cargoEdge = blockStep * 0.5; // a true cube, clearly smaller than a full cell
+      const cargoGeo = new THREE.BoxGeometry(cargoEdge, cargoEdge, cargoEdge);
       const cargoPalette = [0xdba13c, 0x4f8fd9];
       const cargoMats = cargoPalette.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.55 }));
       for (const c of this.mapCargo) {
         const mesh = new THREE.Mesh(cargoGeo, cargoMats[c.kind % cargoMats.length]);
-        mesh.position.set(this._mapWorldX(c.bx), cargoHeight / 2, this._mapWorldZ(c.by));
+        mesh.position.set(this._mapWorldX(c.bx), cargoEdge / 2, this._mapWorldZ(c.by));
         this.scene.add(mesh);
         this.mapCargoMeshes.push(mesh);
       }
+    }
+
+    // Agent mode 3's shared "explored map" highlight: a subtly brighter tile
+    // painted the instant any racer's shared vision first reaches a cell (see
+    // js/agent3.js's markSensed -> game._markMapExplored), so the swarm's
+    // pooled knowledge of the map is visible at a glance, not just implied.
+    this._mapExploredCount = 0;
+    if (isAgent3) {
+      const exploredGeo = new THREE.PlaneGeometry(blockStep * 0.96, blockStep * 0.96);
+      const exploredMat = new THREE.MeshBasicMaterial({
+        color: 0xeef3f9, transparent: true, opacity: 0.4, depthWrite: false,
+      });
+      this.mapExploredMesh = new THREE.InstancedMesh(exploredGeo, exploredMat, blocksX * blocksY);
+      this.mapExploredMesh.count = 0;
+      this.mapExploredMesh.frustumCulled = false;
+      this.scene.add(this.mapExploredMesh);
+    } else {
+      this.mapExploredMesh = null;
     }
 
     const goalGeo = new THREE.CircleGeometry(cellSize * 0.32, 24);
@@ -888,6 +905,12 @@ export class Game {
     this.mapGoalMarkers = [];
     for (const mesh of this.mapCargoMeshes || []) this.scene.remove(mesh);
     this.mapCargoMeshes = [];
+    if (this.mapExploredMesh) {
+      this.scene.remove(this.mapExploredMesh);
+      this.mapExploredMesh.geometry.dispose();
+      this.mapExploredMesh.material.dispose();
+      this.mapExploredMesh = null;
+    }
     for (const racer of (this.mapRacers || [])) {
       this.scene.remove(racer.pathDots);
       this.scene.remove(racer.pathGlow);
@@ -926,6 +949,18 @@ export class Game {
 
   _applyMapMove(racer, next) {
     racer.idleTicks = 0; // it moved this round - not stuck
+    // A temporary "avoid this cell" exclusion (used to force a real detour
+    // around an obstacle A* would otherwise route straight back through)
+    // counts down on every successful step the racer actually takes, not
+    // just steps taken while following the specific route that set it - a
+    // racer that falls back to blind exploring for a while (because
+    // excluding the cell left no known route at all) still needs the
+    // exclusion to expire, or it can never be retried and the racer is
+    // stuck for good.
+    if (racer.avoidSteps > 0) {
+      racer.avoidSteps -= 1;
+      if (!racer.avoidSteps) racer.avoidCell = null;
+    }
     const dx = next.fx - racer.bx;
     const dy = next.fy - racer.by;
     const dir = dx === 1 ? RIGHT : dx === -1 ? LEFT : dy === 1 ? BACKWARD : FORWARD;
@@ -969,6 +1004,24 @@ export class Game {
 
   _isMapGoal(x, y) {
     return this.mapGoals.some((g) => g.bx === x && g.by === y);
+  }
+
+  // Paints one more tile onto the agent-3 "explored map" highlight the first
+  // time a cell enters anyone's shared vision. Appends one instance rather
+  // than rebuilding the whole set each call, so this is O(1) per newly-seen
+  // cell, not O(explored so far).
+  _markMapExplored(x, y) {
+    if (!this.mapExploredMesh) return;
+    const i = this._mapExploredCount++;
+    const matrix = new THREE.Matrix4();
+    matrix.compose(
+      new THREE.Vector3(this._mapWorldX(x), 0.015, this._mapWorldZ(y)),
+      new THREE.Quaternion().setFromAxisAngle(PITCH_AXIS, -Math.PI / 2),
+      new THREE.Vector3(1, 1, 1)
+    );
+    this.mapExploredMesh.setMatrixAt(i, matrix);
+    this.mapExploredMesh.count = i + 1;
+    this.mapExploredMesh.instanceMatrix.needsUpdate = true;
   }
 
   _mapCellAvailable(x, y, racer) {
@@ -1111,10 +1164,8 @@ export class Game {
     const next = racer.path[racer.pathIndex + 1];
     if (this._tryClearWayFor(racer, next)) {
       racer.blockedAttempts = 0;
-      if (racer.avoidSteps > 0) {
-        racer.avoidSteps -= 1;
-        if (!racer.avoidSteps) racer.avoidCell = null;
-      }
+      // avoidSteps counts down centrally in _applyMapMove, on every
+      // successful step regardless of strategy.
       racer.pathIndex += 1;
       this._updateMapPathDots(racer, racer.path.slice(racer.pathIndex));
       return next;
