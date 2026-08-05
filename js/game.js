@@ -4,7 +4,7 @@ import { RollingShape } from './roller.js';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
-import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=4';
+import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=5';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -709,6 +709,14 @@ export class Game {
     }
     this.mapGoal = this.mapGoals[0];
     this.mapCargo = isAgent3 ? this.blockGrid.cargo : [];
+    // Agent mode 3's one-time, purely cosmetic finish celebration: once every
+    // racer has reached a goal, every completed line welds itself into one
+    // rigid body (a connector between each adjacent pair) and rolls together
+    // one cell toward its own open/entrance side, dragging each line's cargo
+    // out of its nook along with it. See _startAgent3Celebration.
+    this._agent3CelebrationStarted = false;
+    this._agent3Connectors = [];
+    this._agent3CargoTweens = [];
 
     const { blocksX, blocksY, openCells, obstacleComponents } = this.blockGrid;
 
@@ -915,6 +923,13 @@ export class Game {
       this._mapExploredTexture = null;
       this._mapExploredCtx = null;
     }
+    for (const c of this._agent3Connectors || []) {
+      this.scene.remove(c.mesh);
+      c.mesh.geometry.dispose();
+      c.mesh.material.dispose();
+    }
+    this._agent3Connectors = [];
+    this._agent3CargoTweens = [];
     for (const racer of (this.mapRacers || [])) {
       this.scene.remove(racer.pathDots);
       this.scene.remove(racer.pathGlow);
@@ -1021,6 +1036,96 @@ export class Game {
     this._mapExploredCtx.fillStyle = '#eef3f9';
     this._mapExploredCtx.fillRect(x * px, y * px, px, px);
     this._mapExploredTexture.needsUpdate = true;
+  }
+
+  // Per-frame upkeep for agent mode 3's finish celebration: fires it once
+  // every racer has reached a goal, then keeps each connector tracking its
+  // pair's live positions and advances every cargo slide while it plays out.
+  _updateAgent3Celebration() {
+    if (!this._agent3CelebrationStarted) {
+      if (this.mapRacers.length && this.mapRacers.every((r) => r.status === 'reached')) {
+        this._startAgent3Celebration();
+      }
+      return;
+    }
+    for (const c of this._agent3Connectors) {
+      const a = c.racerA.shape.group.position;
+      const b = c.racerB.shape.group.position;
+      c.mesh.position.set((a.x + b.x) / 2, this.apothem, (a.z + b.z) / 2);
+    }
+    if (this._agent3CargoTweens.length) {
+      const now = performance.now();
+      this._agent3CargoTweens = this._agent3CargoTweens.filter((tw) => {
+        const t = Math.min(1, (now - tw.start) / tw.duration);
+        const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        tw.mesh.position.set(
+          tw.fromX + (tw.toX - tw.fromX) * eased,
+          tw.mesh.position.y,
+          tw.fromZ + (tw.toZ - tw.fromZ) * eased
+        );
+        return t < 1;
+      });
+    }
+  }
+
+  // Welds every completed goal line into one rigid body (a connector bar
+  // between each 4-adjacent pair of its racers) and sends the whole line
+  // rolling one cell toward its own open/entrance side in lockstep, dragging
+  // any cargo paired with a vacated goal cell out of its nook along with it.
+  // Purely cosmetic - runs once, after everyone has already finished, so it
+  // never touches blockGrid/pathfinding state.
+  _startAgent3Celebration() {
+    this._agent3CelebrationStarted = true;
+    const goalAt = (x, y) => this.mapGoals.find((g) => g.bx === x && g.by === y);
+    const racerAt = (x, y) => this.mapRacers.find((r) => r.bx === x && r.by === y);
+
+    const cellSize = this.forwardStep;
+    const blockStep = MAZE_RATIO * cellSize;
+    const barThickness = cellSize * 0.14;
+    const barHeight = this.apothem * 0.4;
+    const barMat = new THREE.MeshStandardMaterial({ color: 0xf0c419, roughness: 0.35, metalness: 0.4 });
+    for (const g of this.mapGoals) {
+      for (const [dx, dy] of [[1, 0], [0, 1]]) { // only +x/+y so each pair is only ever built once
+        const other = goalAt(g.bx + dx, g.by + dy);
+        if (!other || other.groupId !== g.groupId) continue;
+        const racerA = racerAt(g.bx, g.by);
+        const racerB = racerAt(other.bx, other.by);
+        if (!racerA || !racerB) continue;
+        const geo = dx
+          ? new THREE.BoxGeometry(blockStep * 0.8, barHeight, barThickness)
+          : new THREE.BoxGeometry(barThickness, barHeight, blockStep * 0.8);
+        const mesh = new THREE.Mesh(geo, barMat);
+        mesh.position.set(this._mapWorldX(g.bx + dx / 2), this.apothem, this._mapWorldZ(g.by + dy / 2));
+        this.scene.add(mesh);
+        this._agent3Connectors.push({ mesh, racerA, racerB });
+      }
+    }
+
+    const moveDuration = 4 * this.shape.tumbleDuration + 2 * this.shape.pauseBetween;
+    for (const racer of this.mapRacers.slice()) {
+      const goal = goalAt(racer.bx, racer.by);
+      if (!goal || !goal.openDir) continue;
+      const { dx, dy } = goal.openDir;
+      const fromBx = racer.bx, fromBy = racer.by;
+      const dir = dx === 1 ? RIGHT : dx === -1 ? LEFT : dy === 1 ? BACKWARD : FORWARD;
+      racer.bx += dx;
+      racer.by += dy;
+      racer.shape.startMove(dir);
+      racer.pendingDir = dir;
+
+      const cargoIndex = this.mapCargo.findIndex((c) => c.goalBx === fromBx && c.goalBy === fromBy);
+      if (cargoIndex < 0) continue;
+      const mesh = this.mapCargoMeshes[cargoIndex];
+      this._agent3CargoTweens.push({
+        mesh,
+        fromX: mesh.position.x,
+        fromZ: mesh.position.z,
+        toX: this._mapWorldX(fromBx),
+        toZ: this._mapWorldZ(fromBy),
+        start: performance.now(),
+        duration: moveDuration,
+      });
+    }
   }
 
   _mapCellAvailable(x, y, racer) {
@@ -1542,6 +1647,7 @@ export class Game {
           const p = racer.shape.group.position;
           racer.shadow.position.set(p.x, 0.02, p.z);
         }
+        if (this.mapStrategy === 'agent3') this._updateAgent3Celebration();
       }
       this._reportStats();
     }

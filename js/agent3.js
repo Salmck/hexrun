@@ -160,6 +160,7 @@ export function agent3ChooseMove(game, racer) {
     if (route && route.length >= 2) {
       racer.path = route;
       racer.pathIndex = 0;
+      racer.exploreTarget = null; // no longer exploring - free up the frontier claim for others
       game._updateMapPathDots(racer, route);
       const next = route[1];
       const parked = game.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === next.fx && o.by === next.fy);
@@ -191,26 +192,70 @@ export function agent3ChooseMove(game, racer) {
   return agent3ExploreStep(game, racer, pool);
 }
 
+// Frontier-directed exploration: a racer heads straight for the nearest
+// FRONTIER cell - open, sensed ground that still borders something unsensed,
+// i.e. the nearest actual edge of the known map - rather than a step-by-step
+// greedy "most unseen neighbour" walk. Racers coordinate so they don't all
+// beeline the same patch of unknown territory: each remembers the frontier
+// cell it's currently heading for (racer.exploreTarget), and a racer picking
+// a NEW target excludes whatever every other still-exploring racer is
+// already claiming, only falling back to a claimed one if nothing else is
+// reachable. The route there passes through the intervening known ground
+// anyway, so nearby unvisited cells still get swept up along the way - nothing
+// is skipped, the racer just doesn't dither over which nearby cell to take
+// first.
 function agent3ExploreStep(game, racer, pool) {
-  const fresh = pool.filter((cell) => !game.agent3Visited.has(`${cell.fx},${cell.fy}`));
-  if (fresh.length) return pickTowardUnseen(game, racer, fresh);
-
-  // Every immediate neighbour here is already-covered ground - a true local
-  // dead end (or a fully-explored pocket). The greedy "most unseen around"
-  // rule has nothing to prefer among already-visited cells, so left on its
-  // own it just wanders the covered ground at random until luck carries it
-  // back out. Instead, actively route to the nearest FRONTIER cell - open,
-  // sensed ground that still has at least one unsensed neighbour, i.e. the
-  // nearest actual edge of the known map - and follow that route straight
-  // back out, like a proper depth-first-search backtrack.
-  const route = findNearestFrontierRoute(game, racer);
-  if (route && route.length >= 2) {
-    const next = route[1];
-    if (game._mapCellAvailable(next.fx, next.fy, racer)) return next;
+  if (racer.exploreTarget && isFrontierCell(game, racer.exploreTarget.fx, racer.exploreTarget.fy)) {
+    const next = routeToward(game, racer, racer.exploreTarget);
+    if (next) return next;
   }
-  // No known frontier left to route to (or it's momentarily blocked) - fall
-  // back to the plain avoid-doubling-back walk over covered ground.
+  racer.exploreTarget = null;
+
+  const claimed = new Set(
+    game.mapRacers
+      .filter((o) => o !== racer && o.status === 'solving' && o.exploreTarget)
+      .map((o) => `${o.exploreTarget.fx},${o.exploreTarget.fy}`)
+  );
+  const all = collectFrontierCells(game);
+  const unclaimed = all.filter((c) => !claimed.has(`${c.fx},${c.fy}`));
+  const candidates = unclaimed.length ? unclaimed : all;
+
+  let best = null, bestD = Infinity;
+  for (const c of candidates) {
+    const d = Math.abs(c.fx - racer.bx) + Math.abs(c.fy - racer.by);
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  if (best) {
+    const next = routeToward(game, racer, best);
+    if (next) { racer.exploreTarget = best; return next; }
+  }
+
+  // No known frontier at all (fully explored, or momentarily unreachable) -
+  // fall back to the plain avoid-doubling-back walk.
   return pickTowardUnseen(game, racer, pool);
+}
+
+function routeToward(game, racer, target) {
+  const sensedOpen = (x, y) => game.agent3Sensed.has(`${x},${y}`) && game.blockGrid.blockOpen(x, y);
+  const route = findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, target);
+  if (!route || route.length < 2) return null;
+  const next = route[1];
+  return game._mapCellAvailable(next.fx, next.fy, racer) ? next : null;
+}
+
+function isFrontierCell(game, x, y) {
+  if (!game.agent3Sensed.has(`${x},${y}`) || !game.blockGrid.blockOpen(x, y)) return false;
+  return DIRS.some(([dx, dy]) => !game.agent3Sensed.has(`${x + dx},${y + dy}`));
+}
+
+function collectFrontierCells(game) {
+  const cells = [];
+  for (const key of game.agent3Sensed) {
+    const sep = key.indexOf(',');
+    const x = Number(key.slice(0, sep)), y = Number(key.slice(sep + 1));
+    if (game.blockGrid.blockOpen(x, y) && isFrontierCell(game, x, y)) cells.push({ fx: x, fy: y });
+  }
+  return cells;
 }
 
 function pickTowardUnseen(game, racer, pool) {
@@ -225,35 +270,6 @@ function pickTowardUnseen(game, racer, pool) {
   pool = pool.filter((cell) => unseenAround(cell) === most);
 
   return pool[Math.floor(Math.random() * pool.length)];
-}
-
-// BFS over sensed-open ground from the racer's own cell, stopping at the
-// first cell that still has an unsensed neighbour - the nearest point where
-// the shared known map actually ends - then A*-routes there over that same
-// sensed ground. Cheap: only ever called once the immediate neighbourhood is
-// fully covered, not on every tick.
-function findNearestFrontierRoute(game, racer) {
-  const sensedOpen = (x, y) => game.agent3Sensed.has(`${x},${y}`) && game.blockGrid.blockOpen(x, y);
-  const isFrontier = (x, y) => DIRS.some(([dx, dy]) => !game.agent3Sensed.has(`${x + dx},${y + dy}`));
-  const key = (x, y) => `${x},${y}`;
-  const seen = new Set([key(racer.bx, racer.by)]);
-  const queue = [{ fx: racer.bx, fy: racer.by }];
-  let head = 0;
-  let target = null;
-  while (head < queue.length) {
-    const cur = queue[head++];
-    if (!(cur.fx === racer.bx && cur.fy === racer.by) && isFrontier(cur.fx, cur.fy)) { target = cur; break; }
-    for (const [dx, dy] of DIRS) {
-      const nx = cur.fx + dx, ny = cur.fy + dy;
-      if (!sensedOpen(nx, ny)) continue;
-      const k = key(nx, ny);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      queue.push({ fx: nx, fy: ny });
-    }
-  }
-  if (!target) return null;
-  return findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, target);
 }
 
 // BFS chain-yield within one goal line's 4-connected run (lines are >=10
@@ -453,6 +469,11 @@ function carveCargoAndEmptySide(grid, width, height, line, cargoList) {
   const otherSide = side === perpPair[0] ? perpPair[1] : perpPair[0];
   const [pdx, pdy] = side;
   const [odx, ody] = otherSide;
+  // Remembered on the line (and copied onto every goal it produces) so the
+  // post-solve celebration knows which way is "the open entrance side" to
+  // roll the finished line toward - see agent3GenerateMap and
+  // game.js's _startAgent3Celebration.
+  line.openDir = { dx: odx, dy: ody };
 
   const maxCargo = Math.floor(n / 2);
   const cargoCount = maxCargo > 0 ? 1 + Math.floor(Math.random() * maxCargo) : 0;
@@ -470,7 +491,10 @@ function carveCargoAndEmptySide(grid, width, height, line, cargoList) {
     if (!inBounds(wx, wy, width, height)) continue;
     grid[wy][wx] = false; // cargo-side edge, forced closed (crate or plain wall)
     if (cargoIdxs.has(i)) {
-      cargoList.push({ bx: wx, by: wy, groupId: line.groupId, kind });
+      // goalBx/goalBy: the specific goal cell this crate sits beside, so the
+      // celebration can drag exactly this crate along when that cell's
+      // racer rolls out of it.
+      cargoList.push({ bx: wx, by: wy, groupId: line.groupId, kind, goalBx: cell.fx, goalBy: cell.fy });
       const fx2 = wx + pdx, fy2 = wy + pdy;
       if (inBounds(fx2, fy2, width, height)) grid[fy2][fx2] = false; // behind the crate, forced closed
     }
@@ -564,7 +588,7 @@ export function agent3GenerateMap(baseSize, racerCount, rng = Math.random) {
     const blockOpen = (x, y) => inBounds(x, y, size, size) && grid[y][x];
 
     const goals = [];
-    for (const line of lines) for (const c of line.cells) goals.push({ bx: c.fx, by: c.fy, groupId: line.groupId });
+    for (const line of lines) for (const c of line.cells) goals.push({ bx: c.fx, by: c.fy, groupId: line.groupId, openDir: line.openDir });
 
     return { blocksX: size, blocksY: size, blockOpen, openCells, obstacleComponents, goals, cargo };
   }
