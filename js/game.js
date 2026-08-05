@@ -1055,15 +1055,26 @@ export class Game {
       const b = c.racerB.shape.group.position;
       c.mesh.position.set((a.x + b.x) / 2, this.apothem, (a.z + b.z) / 2);
     }
-    // Rigidly follow each dragged crate to its racer's own animated position
-    // (offset held constant) rather than tweening it along a flat line - the
-    // racer's own tumble arc already lifts and settles its centre as it
-    // rolls, and riding that same motion at a fixed offset is exactly what
-    // makes the crate read as pulled along by the roll instead of sliding.
+    // Rigidly follow each dragged crate to its racer's own animated ground
+    // position at a constant horizontal offset - so it tracks the racer's
+    // real (slightly curved) rolling path and always lands exactly on the
+    // vacated goal cell - but give the crate its OWN explicit vertical hop
+    // synced to each tumble rather than reusing the racer's actual Y motion
+    // directly: the shape's own centre only rises a few percent of its own
+    // diameter as it tips over an edge, which reads fine on the shape itself
+    // (its dramatic 90-degree flip is what sells the roll) but is nowhere
+    // near visible on a crate several times its size that isn't rotating at
+    // all - the crate needs its own bigger, deliberate lift to read as
+    // "picked up by the roll" rather than sliding flat.
     if (this._agent3CargoTweens.length) {
       this._agent3CargoTweens = this._agent3CargoTweens.filter((tw) => {
-        tw.mesh.position.copy(tw.racer.shape.group.position).add(tw.offset);
-        return tw.racer.shape.isBusy() || tw.racer.pendingDir;
+        const p = tw.racer.shape.group.position;
+        const shape = tw.racer.shape;
+        const hop = shape.phase === 'tumbling'
+          ? Math.sin(Math.min(1, shape.elapsed / shape.tumbleDuration) * Math.PI) * tw.liftAmplitude
+          : 0;
+        tw.mesh.position.set(p.x + tw.offsetX, tw.restY + hop, p.z + tw.offsetZ);
+        return shape.isBusy() || tw.racer.pendingDir;
       });
     }
   }
@@ -1124,8 +1135,14 @@ export class Game {
       const cargoIndex = this.mapCargo.findIndex((c) => c.goalBx === fromBx && c.goalBy === fromBy);
       if (cargoIndex < 0) continue;
       const mesh = this.mapCargoMeshes[cargoIndex];
-      const offset = mesh.position.clone().sub(racer.shape.group.position);
-      this._agent3CargoTweens.push({ mesh, racer, offset });
+      this._agent3CargoTweens.push({
+        mesh,
+        racer,
+        offsetX: mesh.position.x - racer.shape.group.position.x,
+        offsetZ: mesh.position.z - racer.shape.group.position.z,
+        restY: mesh.position.y,
+        liftAmplitude: this.apothem * 0.9,
+      });
     }
   }
 
