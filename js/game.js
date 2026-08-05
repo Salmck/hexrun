@@ -1066,8 +1066,10 @@ export class Game {
       this._agent3CargoTweens = this._agent3CargoTweens.filter((tw) => {
         const shape = tw.racer.shape;
         if (tw.mode === 'swing') {
-          const worldOffset = tw.localOffset.clone().applyQuaternion(shape.group.quaternion);
+          const qt = shape.group.quaternion;
+          const worldOffset = tw.localOffset.clone().applyQuaternion(qt);
           tw.mesh.position.copy(shape.group.position).add(worldOffset);
+          tw.mesh.quaternion.copy(qt).multiply(tw.q0Inv);
         } else {
           const p = shape.group.position;
           tw.mesh.position.set(p.x + tw.offsetX, tw.restY, p.z + tw.offsetZ);
@@ -1113,9 +1115,14 @@ export class Game {
     }
 
     // Much slower than any normal-play speed setting - a deliberate,
-    // ceremonial roll rather than more gameplay movement.
+    // ceremonial roll rather than more gameplay movement. A racer paired
+    // with blue cargo instead gets a quick half-cell flick - one startMove
+    // (two tumbles) at high speed, not the full two-startMove/four-tumble
+    // block move - so it doesn't need its own second half queued.
     const CELEBRATION_TUMBLE_DURATION = 480;
     const CELEBRATION_PAUSE_BETWEEN = 160;
+    const CELEBRATION_FLICK_TUMBLE_DURATION = 30;
+    const CELEBRATION_FLICK_PAUSE_BETWEEN = 5;
 
     for (const racer of this.mapRacers.slice()) {
       const goal = goalAt(racer.bx, racer.by);
@@ -1123,27 +1130,38 @@ export class Game {
       const { dx, dy } = goal.openDir;
       const fromBx = racer.bx, fromBy = racer.by;
       const dir = dx === 1 ? RIGHT : dx === -1 ? LEFT : dy === 1 ? BACKWARD : FORWARD;
-      racer.bx += dx;
-      racer.by += dy;
-      racer.shape.tumbleDuration = CELEBRATION_TUMBLE_DURATION;
-      racer.shape.pauseBetween = CELEBRATION_PAUSE_BETWEEN;
-      racer.shape.startMove(dir);
-      racer.pendingDir = dir;
 
       const cargoIndex = this.mapCargo.findIndex((c) => c.goalBx === fromBx && c.goalBy === fromBy);
+      const kind = cargoIndex >= 0 ? this.mapCargo[cargoIndex].kind : null;
+
+      if (kind === 1) {
+        // Blue: fast half-cell flick. bx/by deliberately NOT advanced - the
+        // racer only physically reaches the halfway point, never the next
+        // cell's true centre.
+        racer.shape.tumbleDuration = CELEBRATION_FLICK_TUMBLE_DURATION;
+        racer.shape.pauseBetween = CELEBRATION_FLICK_PAUSE_BETWEEN;
+        racer.shape.startMove(dir);
+      } else {
+        racer.bx += dx;
+        racer.by += dy;
+        racer.shape.tumbleDuration = CELEBRATION_TUMBLE_DURATION;
+        racer.shape.pauseBetween = CELEBRATION_PAUSE_BETWEEN;
+        racer.shape.startMove(dir);
+        racer.pendingDir = dir;
+      }
+
       if (cargoIndex < 0) continue;
       const mesh = this.mapCargoMeshes[cargoIndex];
-      const kind = this.mapCargo[cargoIndex].kind;
       if (kind === 1) {
-        // Blue: rigid rod to the racer's centre. Express the current
-        // world-space offset in the racer's OWN (rotating) local frame once,
-        // at the moment the roll starts - re-applying the racer's current
-        // orientation to that fixed local vector every frame is exactly
-        // "rotates with the racer, constant relative position", not a
-        // scripted bob.
-        const worldOffset0 = mesh.position.clone().sub(racer.shape.group.position);
-        const localOffset = worldOffset0.applyQuaternion(racer.shape.group.quaternion.clone().invert());
-        this._agent3CargoTweens.push({ mesh, racer, mode: 'swing', localOffset });
+        // Blue: rigid rod to the racer's centre, tumbling right along with
+        // it (doesn't stay upright) - both the crate's position AND its own
+        // orientation are expressed once in the racer's own (rotating)
+        // local frame, then re-derived every frame from the racer's CURRENT
+        // orientation, so the whole rigid attachment - point and facing
+        // alike - swings and spins together with the racer's roll.
+        const q0Inv = racer.shape.group.quaternion.clone().invert();
+        const localOffset = mesh.position.clone().sub(racer.shape.group.position).applyQuaternion(q0Inv);
+        this._agent3CargoTweens.push({ mesh, racer, mode: 'swing', localOffset, q0Inv });
       } else {
         // Yellow: plain flat drag, never leaves the ground.
         this._agent3CargoTweens.push({
