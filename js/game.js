@@ -1114,15 +1114,21 @@ export class Game {
       }
     }
 
-    // Much slower than any normal-play speed setting - a deliberate,
-    // ceremonial roll rather than more gameplay movement. Every racer in a
-    // welded line tumbles at this SAME tempo, so the whole connected group
-    // reads as moving together - a racer paired with blue cargo just does
-    // one startMove (two tumbles, a half-cell flick) instead of two, so it
-    // covers half the distance and naturally finishes first, rather than
-    // rushing ahead of its still-rolling neighbours at a different speed.
-    const CELEBRATION_TUMBLE_DURATION = 480;
-    const CELEBRATION_PAUSE_BETWEEN = 160;
+    // Slower than any normal-play speed setting - a deliberate, ceremonial
+    // roll rather than more gameplay movement. A whole goal LINE moves as
+    // one rigid, perfectly synchronised group: every racer in it uses the
+    // exact same distance and tempo, decided once per line by whichever
+    // cargo colour that line carries (a line's cargo is always one colour -
+    // see carveCargoAndEmptySide) rather than per racer, so there's never a
+    // mix of some racers going half a cell and others a full cell, or some
+    // faster and some slower, within the same welded line.
+    const SLOW_TUMBLE_DURATION = 480;
+    const SLOW_PAUSE_BETWEEN = 160;
+    const FAST_TUMBLE_DURATION = 220;
+    const FAST_PAUSE_BETWEEN = 70;
+
+    const lineKind = new Map();
+    for (const c of this.mapCargo) if (!lineKind.has(c.groupId)) lineKind.set(c.groupId, c.kind);
 
     for (const racer of this.mapRacers.slice()) {
       const goal = goalAt(racer.bx, racer.by);
@@ -1130,24 +1136,26 @@ export class Game {
       const { dx, dy } = goal.openDir;
       const fromBx = racer.bx, fromBy = racer.by;
       const dir = dx === 1 ? RIGHT : dx === -1 ? LEFT : dy === 1 ? BACKWARD : FORWARD;
+      const kind = lineKind.get(goal.groupId) ?? null; // whole line's cargo colour, not just this cell's
 
-      const cargoIndex = this.mapCargo.findIndex((c) => c.goalBx === fromBx && c.goalBy === fromBy);
-      const kind = cargoIndex >= 0 ? this.mapCargo[cargoIndex].kind : null;
-
-      racer.shape.tumbleDuration = CELEBRATION_TUMBLE_DURATION;
-      racer.shape.pauseBetween = CELEBRATION_PAUSE_BETWEEN;
       if (kind === 1) {
-        // Blue: half-cell flick, same tempo as everyone else - just one
+        // Blue line: every member does the same fast half-cell flick - one
         // startMove instead of two. bx/by deliberately NOT advanced - the
         // racer only physically reaches the halfway point, never the next
         // cell's true centre.
+        racer.shape.tumbleDuration = FAST_TUMBLE_DURATION;
+        racer.shape.pauseBetween = FAST_PAUSE_BETWEEN;
         racer.shape.startMove(dir);
       } else {
         racer.bx += dx;
         racer.by += dy;
+        racer.shape.tumbleDuration = SLOW_TUMBLE_DURATION;
+        racer.shape.pauseBetween = SLOW_PAUSE_BETWEEN;
         racer.shape.startMove(dir);
         racer.pendingDir = dir;
       }
+
+      const cargoIndex = this.mapCargo.findIndex((c) => c.goalBx === fromBx && c.goalBy === fromBy);
 
       if (cargoIndex < 0) continue;
       const mesh = this.mapCargoMeshes[cargoIndex];
