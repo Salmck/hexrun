@@ -4,7 +4,7 @@ import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
-import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=6';
+import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -856,12 +856,19 @@ export class Game {
     // - inset from both ends of the line by the same gap a crate keeps
     //   from its own cell's edge, rather than running flush to the line's
     //   full length.
+    const platformHeight = wallHeight - 0.2 * cargoEdge;
+    this._agent3CargoEdge = cargoEdge;
+    this._agent3PlatformTopY = platformHeight;
     this.mapPlatformMeshes = [];
     if (this.mapPlatforms.length) {
-      const platformMat = new THREE.MeshStandardMaterial({ color: wallPalette[0], roughness: 0.86 });
-      const platformHeight = wallHeight - 0.2 * cargoEdge;
+      // A pleasant deep-teal landing pad rather than reused generic wall
+      // stone, with a touch of sheen so it visibly reads as a purpose-built
+      // platform instead of more maze wall.
+      const platformMat = new THREE.MeshStandardMaterial({ color: 0x2f6d78, roughness: 0.5, metalness: 0.12 });
       const nearFace = 0.75 * blockStep + this.apothem * 1.15;
-      const farFace = 1.49 * blockStep; // the platform cell's original outer edge, unchanged
+      // Runs two cells deep now (see agent3.js's carveCargoAndEmptySide) -
+      // the far face is pushed out by one more full block cell to cover it.
+      const farFace = 1.49 * blockStep + blockStep;
       const acrossWidth = farFace - nearFace;
       const acrossCenter = (nearFace + farFace) / 2;
 
@@ -873,7 +880,11 @@ export class Game {
       for (const cells of byLine.values()) {
         const goal = this.mapGoals.find((g) => g.groupId === cells[0].groupId);
         const { dx: odx, dy: ody } = goal.openDir;
-        const horizontal = cells.every((c) => c.by === cells[0].by); // strip runs along bx
+        // The line's own run axis is always perpendicular to its openDir -
+        // read orientation off that rather than off the platform cells
+        // themselves, since those now span two depth rows/columns (near and
+        // far) and no longer all share one shared bx/by.
+        const horizontal = odx === 0; // strip runs along bx
         const coords = cells.map((c) => (horizontal ? c.bx : c.by)).sort((a, b) => a - b);
         const along = (coords[coords.length - 1] - coords[0] + 1) * blockStep - 2 * cargoCellGap;
         const midCoord = (coords[0] + coords[coords.length - 1]) / 2;
@@ -1108,7 +1119,7 @@ export class Game {
   // 'reached' - still mid-tumble into that very cell would visibly cut the
   // arrival animation short), then keeps each connector tracking its pair's
   // live positions and rides each dragged crate along with its racer.
-  _updateAgent3Celebration() {
+  _updateAgent3Celebration(dt) {
     if (!this._agent3CelebrationStarted) {
       const allSettled = this.mapRacers.length &&
         this.mapRacers.every((r) => r.status === 'reached' && !r.shape.isBusy() && !r.pendingDir);
@@ -1133,28 +1144,92 @@ export class Game {
         racer.shape.startMove(dir, 1);
       }
     }
-    // Two different drags, one per cargo colour:
+    // Three behaviours, keyed by tw.mode/tw.phase:
     // - 'drag' (yellow, kind 0): stays flat on the ground, sliding along
     //   with the racer's horizontal position only - never leaves the floor.
-    // - 'swing' (blue, kind 1): rigidly attached to the racer's centre by an
-    //   imagined rod, so as the racer's own orientation tumbles the crate
-    //   swings around the racer's CURRENT position with it - a rotation
-    //   about the racer, not a bob up and down in place.
+    // - 'swing' (blue, kind 1, while the racer is still rolling): rigidly
+    //   attached to the racer's centre by an imagined rod, so as the
+    //   racer's own orientation tumbles the crate swings around the
+    //   racer's CURRENT position with it.
+    // - 'drop' (blue, kind 1, once the racer has fully stopped): the rod
+    //   lets go and the crate free-falls onto its platform, corner-first,
+    //   then topples over to rest flat - see _startAgent3CargoDrop.
     if (this._agent3CargoTweens.length) {
       this._agent3CargoTweens = this._agent3CargoTweens.filter((tw) => {
         const shape = tw.racer.shape;
         if (tw.mode === 'swing') {
-          const qt = shape.group.quaternion;
-          const worldOffset = tw.localOffset.clone().applyQuaternion(qt);
-          tw.mesh.position.copy(shape.group.position).add(worldOffset);
-          tw.mesh.quaternion.copy(qt).multiply(tw.q0Inv);
-        } else {
-          const p = shape.group.position;
-          tw.mesh.position.set(p.x + tw.offsetX, tw.restY, p.z + tw.offsetZ);
+          if (shape.isBusy() || tw.racer._agent3ExtraTumbleDir || tw.racer.pendingDir) {
+            const qt = shape.group.quaternion;
+            const worldOffset = tw.localOffset.clone().applyQuaternion(qt);
+            tw.mesh.position.copy(shape.group.position).add(worldOffset);
+            tw.mesh.quaternion.copy(qt).multiply(tw.q0Inv);
+            return true;
+          }
+          // The rolling is done - hand off to the drop-and-tip animation
+          // instead of just freezing the rod attachment in place.
+          this._startAgent3CargoDrop(tw);
+          return this._advanceAgent3CargoDrop(tw, dt);
         }
+        if (tw.mode === 'drop') return this._advanceAgent3CargoDrop(tw, dt);
+        const p = shape.group.position;
+        tw.mesh.position.set(p.x + tw.offsetX, tw.restY, p.z + tw.offsetZ);
         return shape.isBusy() || tw.racer.pendingDir;
       });
     }
+  }
+
+  // Converts an in-flight 'swing' tween into a 'drop' one, snapshotting the
+  // crate's current world position/orientation as the fall's start point.
+  // XZ never changes again after this - the racer's finish flick already
+  // carried the crate out over its platform, so the fall only needs to
+  // handle height and tumble, not travel.
+  _startAgent3CargoDrop(tw) {
+    tw.mode = 'drop';
+    tw.dropPhase = 'fall';
+    tw.dropElapsed = 0;
+    tw.startY = tw.mesh.position.y;
+    tw.startQuat = tw.mesh.quaternion.clone();
+    const edge = this._agent3CargoEdge;
+    const platformTopY = this._agent3PlatformTopY;
+    // A cube dropped so one corner touches down first rests with its space
+    // diagonal vertical - the centre sits half that diagonal above the
+    // contact point.
+    tw.cornerY = platformTopY + (edge / 2) * Math.sqrt(3);
+    tw.restY = platformTopY + edge / 2;
+    tw.cornerQuat = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(1, 1, 1).normalize(),
+      new THREE.Vector3(0, -1, 0)
+    );
+  }
+
+  // Advances one crate's fall-then-topple. Returns true while the tween
+  // should keep being updated, false once it has settled (caller filters
+  // it out of the active list at that point). Pure keyframe interpolation,
+  // not physics - a short quadratic "gravity" ease into the corner-down
+  // landing, then an ease-out topple onto a full face.
+  _advanceAgent3CargoDrop(tw, dt) {
+    const FALL_MS = 260;
+    const TIP_MS = 340;
+    tw.dropElapsed += dt;
+    if (tw.dropPhase === 'fall') {
+      const t = Math.min(1, tw.dropElapsed / FALL_MS);
+      const ease = t * t; // accelerating fall
+      tw.mesh.position.y = tw.startY + (tw.cornerY - tw.startY) * ease;
+      tw.mesh.quaternion.slerpQuaternions(tw.startQuat, tw.cornerQuat, t);
+      if (t >= 1) {
+        tw.dropPhase = 'tip';
+        tw.dropElapsed = 0;
+      }
+      return true;
+    }
+    const t = Math.min(1, tw.dropElapsed / TIP_MS);
+    const ease = 1 - (1 - t) * (1 - t); // decelerating topple to rest
+    tw.mesh.position.y = tw.cornerY + (tw.restY - tw.cornerY) * ease;
+    // A solid-coloured cube looks identical under any 90-degree rotation,
+    // so settling toward the identity orientation reads as "toppled flat"
+    // no matter which face it actually lands on.
+    tw.mesh.quaternion.slerpQuaternions(tw.cornerQuat, new THREE.Quaternion(), ease);
+    return t < 1;
   }
 
   // Welds every completed goal line into one rigid body (a connector rod
@@ -1784,7 +1859,7 @@ export class Game {
           const p = racer.shape.group.position;
           racer.shadow.position.set(p.x, 0.02, p.z);
         }
-        if (this.mapStrategy === 'agent3') this._updateAgent3Celebration();
+        if (this.mapStrategy === 'agent3') this._updateAgent3Celebration(dt);
       }
       this._reportStats();
     }

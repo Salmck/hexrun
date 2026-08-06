@@ -497,6 +497,14 @@ function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformLi
       if (kind === 1) {
         grid[ey][ex] = false; // blue line: entrance side becomes a solid platform
         platformList.push({ bx: ex, by: ey, groupId: line.groupId });
+        // Platform runs two cells deep, not one - the extra cell gives the
+        // finish celebration's dropped crate somewhere to land beyond the
+        // racer's own reach (see game.js's blue-cargo drop-and-tip animation).
+        const ex2 = ex + odx, ey2 = ey + ody;
+        if (inBounds(ex2, ey2, width, height)) {
+          grid[ey2][ex2] = false;
+          platformList.push({ bx: ex2, by: ey2, groupId: line.groupId });
+        }
       } else {
         grid[ey][ex] = true; // yellow line: entrance side stays clear approach ground
       }
