@@ -1178,62 +1178,78 @@ export class Game {
     }
   }
 
-  // Converts an in-flight 'swing' tween into a 'drop' one, in two distinct
-  // phases:
-  // - 'fall': a plain straight-down drop (XZ frozen) across the small gap
-  //   the rod left between the crate and the platform, while its
-  //   orientation catches up from whatever the swing left it at to a clean
-  //   "balanced on its landing edge" pose, timed to arrive together.
-  // - 'tip': once that edge is touching, it becomes a genuinely fixed pivot
-  //   (computed once here, never recomputed) and the crate rotates purely
-  //   around it down to flat - the edge itself never slides, only the
-  //   crate's centre arcs around it, swinging toward the platform's far
-  //   (deeper) side as it settles, the way a box tipping off its trailing
-  //   edge naturally falls forward.
-  // See _advanceAgent3CargoDrop for the per-frame math of each phase.
+  // Converts an in-flight 'swing' tween into a 'drop' one. A blue racer's
+  // celebration move is 3 tumbles - 45 degrees each - so the rod releases
+  // the crate exactly mid-roll, tilted 135 degrees off its original resting
+  // face: balanced on the one real edge between that original bottom face
+  // and the next face around, already the lowest point on the crate. There
+  // is nothing to invent here - the crate just keeps rolling the same way
+  // it already was, the remaining 45 degrees to the next flat face (which
+  // is the ORIGINAL TOP face, now facing down), pivoting on that same edge.
+  // Two phases:
+  // - 'fall': the tiny straight drop (orientation unchanged) across
+  //   whatever gap the rod left before that edge actually reaches the
+  //   platform.
+  // - 'tip': a pure rotation about that edge - now genuinely fixed, in
+  //   both position and axis - for the remaining 45 degrees down to flat.
   _startAgent3CargoDrop(tw) {
     tw.mode = 'drop';
     tw.dropPhase = 'fall';
     tw.dropElapsed = 0;
-    tw.startQuat = tw.mesh.quaternion.clone();
-    tw.cx = tw.mesh.position.x;
-    tw.cz = tw.mesh.position.z;
-    tw.fallStartY = tw.mesh.position.y;
+    const q0 = tw.mesh.quaternion.clone();
+    const pos0 = tw.mesh.position.clone();
+    tw.q0 = q0;
 
+    // The crate's own roll axis and how far it has already turned, read
+    // straight off its actual current orientation rather than assumed from
+    // travel direction - robust to whichever way it happens to be rolling.
+    const angle0 = 2 * Math.acos(Math.min(1, Math.max(-1, q0.w)));
+    const s = Math.sqrt(Math.max(1 - q0.w * q0.w, 1e-12));
+    const axis = s > 1e-6
+      ? new THREE.Vector3(q0.x, q0.y, q0.z).multiplyScalar(1 / s)
+      : new THREE.Vector3(-tw.dirZ, 0, tw.dirX);
+    tw.axis = axis;
+    tw.angle0 = angle0;
+
+    // Of the crate's 8 corners, the lowest one right now (given q0) sits on
+    // the real contact edge - the edge itself runs parallel to the roll
+    // axis, so this one corner plus the axis fully pins the pivot line down.
     const h = this._agent3CargoEdge / 2;
+    let lowestLocal = null;
+    let lowestY = Infinity;
+    for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+      const local = new THREE.Vector3(sx * h, sy * h, sz * h);
+      const y = local.clone().applyQuaternion(q0).y;
+      if (y < lowestY) { lowestY = y; lowestLocal = local; }
+    }
+    const cornerOffsetWorld = lowestLocal.clone().applyQuaternion(q0);
     const platformTopY = this._agent3PlatformTopY;
-    const { dirX: odx, dirZ: ody } = tw;
-    // Horizontal axis, perpendicular to the direction of travel, that the
-    // crate tips around.
-    tw.tipAxis = new THREE.Vector3(-ody, 0, odx);
-    // Vector from the landing (trailing) edge to the crate's centre once
-    // flat (tip angle 0) - the near edge, the one closer to where the
-    // crate started, so tipping toward 0 always swings the centre further
-    // toward the platform's far side.
-    tw.flatOffset = new THREE.Vector3(odx * h, h, ody * h);
-    // Starts tipped up near-standing on that edge (~40 degrees off flat)
-    // and rotates down to flat as it settles.
-    tw.tipStart = (40 * Math.PI) / 180;
-    tw.tipQuat = new THREE.Quaternion().setFromAxisAngle(tw.tipAxis, tw.tipStart);
-    const tippedOffset = tw.flatOffset.clone().applyAxisAngle(tw.tipAxis, tw.tipStart);
-    // The height at which that tipped pose's edge would exactly touch the
-    // platform - where the fall phase ends and the pivot locks in.
-    tw.fallEndY = platformTopY + tippedOffset.y;
-    tw.pivot = new THREE.Vector3(tw.cx - tippedOffset.x, platformTopY, tw.cz - tippedOffset.z);
+    const gap = Math.max(0, pos0.y + cornerOffsetWorld.y - platformTopY);
+
+    tw.fallStart = pos0;
+    tw.fallEndPos = new THREE.Vector3(pos0.x, pos0.y - gap, pos0.z);
+    // Fixed for the rest of the animation: the exact point the contact
+    // corner sits at once the fall phase closes the gap.
+    tw.pivot = new THREE.Vector3(
+      tw.fallEndPos.x + cornerOffsetWorld.x, platformTopY, tw.fallEndPos.z + cornerOffsetWorld.z
+    );
+    // Centre's offset from that pivot, in world space, at the moment the
+    // tip phase begins (angle0, before any further rotation is applied).
+    tw.centerOffset0 = tw.fallEndPos.clone().sub(tw.pivot);
   }
 
   // Advances one crate's fall-then-tip. Returns true while the tween
   // should keep being updated, false once it has settled flat (caller
   // filters it out of the active list at that point).
   _advanceAgent3CargoDrop(tw, dt) {
-    const FALL_MS = 200;
+    const FALL_MS = 150;
     const TIP_MS = 380;
     tw.dropElapsed += dt;
     if (tw.dropPhase === 'fall') {
       const t = Math.min(1, tw.dropElapsed / FALL_MS);
       const ease = t * t; // accelerating, gravity-like
-      tw.mesh.position.set(tw.cx, tw.fallStartY + (tw.fallEndY - tw.fallStartY) * ease, tw.cz);
-      tw.mesh.quaternion.slerpQuaternions(tw.startQuat, tw.tipQuat, t);
+      tw.mesh.position.lerpVectors(tw.fallStart, tw.fallEndPos, ease);
+      tw.mesh.quaternion.copy(tw.q0); // still mid-roll, not rotating further yet
       if (t >= 1) {
         tw.dropPhase = 'tip';
         tw.dropElapsed = 0;
@@ -1242,10 +1258,11 @@ export class Game {
     }
     const t = Math.min(1, tw.dropElapsed / TIP_MS);
     const p = t * t * (3 - 2 * t); // smoothstep, settles gently
-    const tip = tw.tipStart * (1 - p);
-    const offset = tw.flatOffset.clone().applyAxisAngle(tw.tipAxis, tip);
-    tw.mesh.position.copy(tw.pivot).add(offset);
-    tw.mesh.quaternion.setFromAxisAngle(tw.tipAxis, tip);
+    // The remaining 45 degrees of the same roll, about the same fixed axis
+    // and pivot - not a new, independently-invented rotation.
+    const delta = new THREE.Quaternion().setFromAxisAngle(tw.axis, (Math.PI / 4) * p);
+    tw.mesh.position.copy(tw.pivot).add(tw.centerOffset0.clone().applyQuaternion(delta));
+    tw.mesh.quaternion.copy(delta).multiply(tw.q0);
     return t < 1;
   }
 
