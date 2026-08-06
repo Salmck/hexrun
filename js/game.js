@@ -861,10 +861,10 @@ export class Game {
     this._agent3PlatformTopY = platformHeight;
     this.mapPlatformMeshes = [];
     if (this.mapPlatforms.length) {
-      // A pleasant deep-teal landing pad rather than reused generic wall
-      // stone, with a touch of sheen so it visibly reads as a purpose-built
-      // platform instead of more maze wall.
-      const platformMat = new THREE.MeshStandardMaterial({ color: 0x2f6d78, roughness: 0.5, metalness: 0.12 });
+      // A bright mint-green landing pad rather than reused generic wall
+      // stone, so it visibly reads as a purpose-built platform instead of
+      // more maze wall.
+      const platformMat = new THREE.MeshStandardMaterial({ color: 0x7bed9f, roughness: 0.6 });
       const nearFace = 0.75 * blockStep + this.apothem * 1.15;
       // Runs two cells deep now (see agent3.js's carveCargoAndEmptySide) -
       // the far face is pushed out by one more full block cell to cover it.
@@ -1178,57 +1178,56 @@ export class Game {
     }
   }
 
-  // Converts an in-flight 'swing' tween into a 'drop' one, snapshotting the
-  // crate's current world position/orientation as the fall's start point.
-  // XZ never changes again after this - the racer's finish flick already
-  // carried the crate out over its platform, so the fall only needs to
-  // handle height and tumble, not travel.
+  // Converts an in-flight 'swing' tween into a 'drop' one: one continuous
+  // fall where the crate tips down onto the platform pivoting around the
+  // single bottom edge that touches it first, the way a real box falling
+  // onto a surface edge-first would rotate flat rather than dropping
+  // straight down and separately flipping. XZ is frozen at the rod's last
+  // handoff position - the racer's finish flick already carried the crate
+  // out over its platform - so only height and tumble are animated.
   _startAgent3CargoDrop(tw) {
     tw.mode = 'drop';
-    tw.dropPhase = 'fall';
     tw.dropElapsed = 0;
-    tw.startY = tw.mesh.position.y;
+    tw.startPos = tw.mesh.position.clone();
     tw.startQuat = tw.mesh.quaternion.clone();
-    const edge = this._agent3CargoEdge;
+
+    const h = this._agent3CargoEdge / 2;
     const platformTopY = this._agent3PlatformTopY;
-    // A cube dropped so one corner touches down first rests with its space
-    // diagonal vertical - the centre sits half that diagonal above the
-    // contact point.
-    tw.cornerY = platformTopY + (edge / 2) * Math.sqrt(3);
-    tw.restY = platformTopY + edge / 2;
-    tw.cornerQuat = new THREE.Quaternion().setFromUnitVectors(
-      new THREE.Vector3(1, 1, 1).normalize(),
-      new THREE.Vector3(0, -1, 0)
-    );
+    const { dirX: odx, dirZ: ody } = tw;
+    // Flat resting pose: same XZ as the handoff, resting height above the
+    // platform.
+    tw.restPos = new THREE.Vector3(tw.startPos.x, platformTopY + h, tw.startPos.z);
+    // The pivot edge - fixed on the platform surface for the whole fall,
+    // one half-edge-length out from the resting centre in the direction of
+    // travel, at the platform's own height.
+    tw.pivot = new THREE.Vector3(tw.restPos.x + odx * h, platformTopY, tw.restPos.z + ody * h);
+    // Vector from the pivot to the crate's centre when flat (tip angle 0).
+    tw.flatOffset = new THREE.Vector3(-odx * h, h, -ody * h);
+    // Horizontal axis, perpendicular to the direction of travel, that the
+    // crate rotates around as it tips down onto that edge.
+    tw.tipAxis = new THREE.Vector3(ody, 0, -odx);
+    // Starts tipped up on the pivot edge (~40 degrees off flat, edge-down
+    // and corner leading) and rotates down to flat as the fall settles.
+    tw.tipStart = (40 * Math.PI) / 180;
   }
 
-  // Advances one crate's fall-then-topple. Returns true while the tween
-  // should keep being updated, false once it has settled (caller filters
-  // it out of the active list at that point). Pure keyframe interpolation,
-  // not physics - a short quadratic "gravity" ease into the corner-down
-  // landing, then an ease-out topple onto a full face.
+  // Advances one crate's edge-pivot fall. Returns true while the tween
+  // should keep being updated, false once it has settled flat (caller
+  // filters it out of the active list at that point).
   _advanceAgent3CargoDrop(tw, dt) {
-    const FALL_MS = 260;
-    const TIP_MS = 340;
+    const DROP_MS = 380;
     tw.dropElapsed += dt;
-    if (tw.dropPhase === 'fall') {
-      const t = Math.min(1, tw.dropElapsed / FALL_MS);
-      const ease = t * t; // accelerating fall
-      tw.mesh.position.y = tw.startY + (tw.cornerY - tw.startY) * ease;
-      tw.mesh.quaternion.slerpQuaternions(tw.startQuat, tw.cornerQuat, t);
-      if (t >= 1) {
-        tw.dropPhase = 'tip';
-        tw.dropElapsed = 0;
-      }
-      return true;
-    }
-    const t = Math.min(1, tw.dropElapsed / TIP_MS);
-    const ease = 1 - (1 - t) * (1 - t); // decelerating topple to rest
-    tw.mesh.position.y = tw.cornerY + (tw.restY - tw.cornerY) * ease;
-    // A solid-coloured cube looks identical under any 90-degree rotation,
-    // so settling toward the identity orientation reads as "toppled flat"
-    // no matter which face it actually lands on.
-    tw.mesh.quaternion.slerpQuaternions(tw.cornerQuat, new THREE.Quaternion(), ease);
+    const t = Math.min(1, tw.dropElapsed / DROP_MS);
+    // Smoothstep: fast at first, settling gently into the flat landing.
+    const p = t * t * (3 - 2 * t);
+    const tip = tw.tipStart * (1 - p);
+    const arcOffset = tw.flatOffset.clone().applyAxisAngle(tw.tipAxis, tip);
+    const arcPos = tw.pivot.clone().add(arcOffset);
+    // Blend from the rod's actual handoff position/orientation into the
+    // idealised pivot arc, so the fall starts exactly where the swing left
+    // off (no snap) and ends exactly flat on the platform.
+    tw.mesh.position.lerpVectors(tw.startPos, arcPos, p);
+    tw.mesh.quaternion.slerpQuaternions(tw.startQuat, new THREE.Quaternion(), p);
     return t < 1;
   }
 
@@ -1325,7 +1324,9 @@ export class Game {
         // alike - swings and spins together with the racer's roll.
         const q0Inv = racer.shape.group.quaternion.clone().invert();
         const localOffset = mesh.position.clone().sub(racer.shape.group.position).applyQuaternion(q0Inv);
-        this._agent3CargoTweens.push({ mesh, racer, mode: 'swing', localOffset, q0Inv });
+        this._agent3CargoTweens.push({
+          mesh, racer, mode: 'swing', localOffset, q0Inv, dirX: dx, dirZ: dy,
+        });
       } else {
         // Yellow: plain flat drag, never leaves the ground.
         this._agent3CargoTweens.push({
