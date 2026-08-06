@@ -818,21 +818,21 @@ export class Game {
     // against the edge of their own cell nearest the goal, rather than at
     // their cell's centre, so they read as leaning right up against the
     // goal line instead of floating in the middle of their own square.
+    const cargoEdge = blockStep * 0.5; // a true cube, clearly smaller than a full cell
+    const cargoCellGap = blockStep / 2 - cargoEdge / 2; // its own cell's edge-to-crate clearance
     this.mapCargoMeshes = [];
     if (this.mapCargo.length) {
-      const cargoEdge = blockStep * 0.5; // a true cube, clearly smaller than a full cell
       const cargoGeo = new THREE.BoxGeometry(cargoEdge, cargoEdge, cargoEdge);
       const cargoPalette = [0xdba13c, 0x4f8fd9];
       const cargoMats = cargoPalette.map((color) => new THREE.MeshStandardMaterial({ color, roughness: 0.55 }));
-      const edgeOffset = blockStep / 2 - cargoEdge / 2;
       for (const c of this.mapCargo) {
         const mesh = new THREE.Mesh(cargoGeo, cargoMats[c.kind % cargoMats.length]);
         const px = c.bx - c.goalBx; // unit vector from the goal toward the cargo cell
         const py = c.by - c.goalBy;
         mesh.position.set(
-          this._mapWorldX(c.bx) - px * edgeOffset,
+          this._mapWorldX(c.bx) - px * cargoCellGap,
           cargoEdge / 2,
-          this._mapWorldZ(c.by) - py * edgeOffset
+          this._mapWorldZ(c.by) - py * cargoCellGap
         );
         this.scene.add(mesh);
         this.mapCargoMeshes.push(mesh);
@@ -840,18 +840,52 @@ export class Game {
     }
 
     // Agent mode 3's blue-line "platforms": the entrance side of a blue
-    // line is a solid, wall-height block instead of open approach ground
-    // (see agent3.js's carveCargoAndEmptySide) - styled like the generic
-    // walls above since blockGrid.blockOpen already reports these cells as
-    // closed, so they block movement identically without any extra
-    // collision-handling code.
+    // line is a solid block instead of open approach ground (real
+    // blockGrid state - see agent3.js's carveCargoAndEmptySide - so it
+    // blocks movement identically to a wall with no extra collision code
+    // needed; this only shapes how it's DRAWN). One merged strip per line
+    // rather than one box per cell, styled like the generic walls above,
+    // with three trims relative to the raw per-cell footprint:
+    // - shorter by 0.2x the cargo edge length, so it reads slightly lower
+    //   than a full wall;
+    // - pulled back on the goal-facing side only (the far side keeps its
+    //   original outer edge) far enough to clear a blue line's finish-
+    //   celebration flick - 0.75 of a cell out, plus the shape's own
+    //   apothem for clearance - since that move now reaches noticeably
+    //   further than it used to and would otherwise visibly clip in;
+    // - inset from both ends of the line by the same gap a crate keeps
+    //   from its own cell's edge, rather than running flush to the line's
+    //   full length.
     this.mapPlatformMeshes = [];
     if (this.mapPlatforms.length) {
-      const platformGeo = new THREE.BoxGeometry(blockStep * 0.98, wallHeight, blockStep * 0.98);
       const platformMat = new THREE.MeshStandardMaterial({ color: wallPalette[0], roughness: 0.86 });
+      const platformHeight = wallHeight - 0.2 * cargoEdge;
+      const nearFace = 0.75 * blockStep + this.apothem * 1.15;
+      const farFace = 1.49 * blockStep; // the platform cell's original outer edge, unchanged
+      const acrossWidth = farFace - nearFace;
+      const acrossCenter = (nearFace + farFace) / 2;
+
+      const byLine = new Map();
       for (const p of this.mapPlatforms) {
-        const mesh = new THREE.Mesh(platformGeo, platformMat);
-        mesh.position.set(this._mapWorldX(p.bx), wallHeight / 2, this._mapWorldZ(p.by));
+        if (!byLine.has(p.groupId)) byLine.set(p.groupId, []);
+        byLine.get(p.groupId).push(p);
+      }
+      for (const cells of byLine.values()) {
+        const goal = this.mapGoals.find((g) => g.groupId === cells[0].groupId);
+        const { dx: odx, dy: ody } = goal.openDir;
+        const horizontal = cells.every((c) => c.by === cells[0].by); // strip runs along bx
+        const coords = cells.map((c) => (horizontal ? c.bx : c.by)).sort((a, b) => a - b);
+        const along = (coords[coords.length - 1] - coords[0] + 1) * blockStep - 2 * cargoCellGap;
+        const midCoord = (coords[0] + coords[coords.length - 1]) / 2;
+        const geo = horizontal
+          ? new THREE.BoxGeometry(along, platformHeight, acrossWidth)
+          : new THREE.BoxGeometry(acrossWidth, platformHeight, along);
+        const mesh = new THREE.Mesh(geo, platformMat);
+        if (horizontal) {
+          mesh.position.set(this._mapWorldX(midCoord), platformHeight / 2, this._mapWorldZ(goal.by) + ody * acrossCenter);
+        } else {
+          mesh.position.set(this._mapWorldX(goal.bx) + odx * acrossCenter, platformHeight / 2, this._mapWorldZ(midCoord));
+        }
         this.scene.add(mesh);
         this.mapPlatformMeshes.push(mesh);
       }
