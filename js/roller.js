@@ -103,12 +103,13 @@ export class RollingShape {
     return { pos, quat };
   }
 
-  // Kicks off a full move (two tumbles) in world-space direction `dir`
-  // (must be a horizontal unit vector). No-op if a move is already playing.
-  startMove(dir) {
+  // Kicks off a move of `tumbleCount` tumbles (two by default, the normal
+  // one-block-step move) in world-space direction `dir` (must be a
+  // horizontal unit vector). No-op if a move is already playing.
+  startMove(dir, tumbleCount = 2) {
     if (this.isBusy()) return false;
     this.dir = dir.clone();
-    this.tumblesRemaining = 2;
+    this.tumblesRemaining = tumbleCount;
     this._beginTumble();
     return true;
   }

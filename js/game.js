@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
-import { RollingShape } from './roller.js';
+import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
@@ -1086,6 +1086,19 @@ export class Game {
       const b = c.racerB.shape.group.position;
       c.mesh.position.set((a.x + b.x) / 2, this.apothem, (a.z + b.z) / 2);
     }
+    // A blue line's move is three tumbles (0.75 of a block cell) total, and
+    // RollingShape.startMove only ever plays 2 or 1 at a time - so once a
+    // blue racer's initial two-tumble startMove has fully settled, fire the
+    // one remaining tumble to finish the move. This runs before the tween
+    // loop below in the same frame, so a tween never sees a gap tick where
+    // the racer looks idle between the two calls.
+    for (const racer of this.mapRacers) {
+      if (racer._agent3ExtraTumbleDir && !racer.shape.isBusy()) {
+        const dir = racer._agent3ExtraTumbleDir;
+        racer._agent3ExtraTumbleDir = null;
+        racer.shape.startMove(dir, 1);
+      }
+    }
     // Two different drags, one per cargo colour:
     // - 'drag' (yellow, kind 0): stays flat on the ground, sliding along
     //   with the racer's horizontal position only - never leaves the floor.
@@ -1170,13 +1183,17 @@ export class Game {
       const kind = lineKind.get(goal.groupId) ?? null; // whole line's cargo colour, not just this cell's
 
       if (kind === 1) {
-        // Blue line: every member does the same fast half-cell flick - one
-        // startMove instead of two. bx/by deliberately NOT advanced - the
-        // racer only physically reaches the halfway point, never the next
+        // Blue line: every member does the same fast three-tumble flick -
+        // 0.75 of a block cell (each tumble covers a quarter-cell, same as
+        // any other move). RollingShape.startMove only ever plays up to 2 at
+        // once, so this fires as a two-tumble startMove now, then one more
+        // lone tumble once that settles (see _updateAgent3Celebration).
+        // bx/by deliberately NOT advanced - the racer never reaches a full
         // cell's true centre.
         racer.shape.tumbleDuration = FAST_TUMBLE_DURATION;
         racer.shape.pauseBetween = FAST_PAUSE_BETWEEN;
         racer.shape.startMove(dir);
+        racer._agent3ExtraTumbleDir = dir;
       } else {
         racer.bx += dx;
         racer.by += dy;
