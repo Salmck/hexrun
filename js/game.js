@@ -5,6 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=1';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -128,16 +129,18 @@ export class Game {
   }
 
   toggleMapStrategy() {
-    const order = ['path', 'explore', 'agent', 'agent2', 'agent3'];
+    const order = ['path', 'explore', 'agent', 'agent2', 'agent3', 'agent4'];
     const previous = this.mapStrategy;
     this.mapStrategy = order[(order.indexOf(this.mapStrategy) + 1) % order.length];
     if (this.gameType === 'map') {
-      // agent2 and agent3 each build a completely different map layout from
-      // every other strategy's single shared goal AND from each other
-      // (scattered cluster vs. separate cargo-lined goal lines) - crossing
-      // any of those boundaries needs a full regeneration, not just
-      // clearing each racer's memory.
-      const mapLayoutClass = (s) => (s === 'agent2' || s === 'agent3') ? s : 'shared';
+      // agent2, agent3, and agent4 each build a completely different map
+      // layout from every other strategy's single shared goal AND from each
+      // other (scattered cluster vs. separate cargo-lined goal lines,
+      // currently identical between agent3 and agent4 but tracked
+      // separately since that's expected to diverge) - crossing any of
+      // those boundaries needs a full regeneration, not just clearing each
+      // racer's memory.
+      const mapLayoutClass = (s) => (s === 'agent2' || s === 'agent3' || s === 'agent4') ? s : 'shared';
       if (mapLayoutClass(previous) !== mapLayoutClass(this.mapStrategy)) {
         this._teardownMapMode();
         this._setupMapMode();
@@ -315,6 +318,13 @@ export class Game {
     const meshGroup = buildMesh(this.rhombi);
     meshGroup.position.set(0, this.apothem, 0);
     this.scene.add(meshGroup);
+    // Racer 0 reuses this one long-lived group across every mode/strategy
+    // switch (see _setupTrackMode/_setupMapMode below) rather than being
+    // rebuilt each time, so its original per-face rainbow palette is
+    // snapshotted once here - anything that overwrites part of it (agent
+    // mode 4's per-triangle robot-type tint) can be cleanly reverted by
+    // restoring from this snapshot instead of having to rebuild the mesh.
+    this._defaultRacer0Colors = meshGroup.children[0].geometry.attributes.color.array.slice();
 
     this.shapeShadow = this._makeBlobShadow(this.apothem * 1.15);
     this.shapeShadow.position.set(0, 0.02, 0);
@@ -366,6 +376,7 @@ export class Game {
       this.cameraOrbit.elevation = 0.46;
       this.cameraOrbit.radius = 168;
     }
+    this._resetRacer0Colors(); // undo any agent-mode-4 triangle tint left over from map mode
     this.finishOrder = [];
     this.trackLength = TRACK_LENGTH;
     this.obstacles = [];
@@ -464,6 +475,39 @@ export class Game {
       attr.setXYZ(i, base.r * variation, base.g * variation, base.b * variation);
     }
     attr.needsUpdate = true;
+  }
+
+  // Overwrites just the 8 triangular faces' vertex colors, leaving whatever
+  // is already on the 18 square faces (a racer's body tint, or racer 0's
+  // untouched rainbow palette) alone. Walks this.rhombi.faces in the same
+  // order buildMesh used to lay out the color attribute, so each face's
+  // vertex count (3 for a triangle, 6 for a square split into two tris)
+  // lines up with the right slice of the attribute array.
+  _setTriangleColor(group, hex) {
+    const mesh = group.children[0];
+    if (!mesh?.geometry?.attributes?.color) return;
+    const color = new THREE.Color(hex);
+    const attr = mesh.geometry.attributes.color;
+    let vi = 0;
+    for (const f of this.rhombi.faces) {
+      const vertCount = f.idxs.length === 3 ? 3 : 6;
+      if (f.type === 'triangle') {
+        for (let k = 0; k < vertCount; k++) attr.setXYZ(vi + k, color.r, color.g, color.b);
+      }
+      vi += vertCount;
+    }
+    attr.needsUpdate = true;
+  }
+
+  // Racer 0's mesh group is built once and reused across every mode and
+  // strategy switch (see _setupShape), so any per-triangle override applied
+  // to it (agent mode 4's robot-type tint) needs to be explicitly undone
+  // when leaving that mode, rather than the mesh being rebuilt fresh.
+  _resetRacer0Colors() {
+    const mesh = this.shape?.group?.children?.[0];
+    if (!mesh?.geometry?.attributes?.color || !this._defaultRacer0Colors) return;
+    mesh.geometry.attributes.color.array.set(this._defaultRacer0Colors);
+    mesh.geometry.attributes.color.needsUpdate = true;
   }
 
   _addRaceLine(row, checker) {
@@ -673,21 +717,27 @@ export class Game {
       this.cameraOrbit.elevation = 1.02;
       this.cameraOrbit.radius = 190;
     }
+    this._resetRacer0Colors(); // start from the pristine palette; agent mode 4 re-applies its tint below
     this.agentGoalKnown = false;
     this.agentTrail = null;
     const isAgent2 = this.mapStrategy === 'agent2';
     const isAgent3 = this.mapStrategy === 'agent3';
+    const isAgent4 = this.mapStrategy === 'agent4';
+    const usesLineMap = isAgent3 || isAgent4; // both build the cargo-lined goal LINE layout
 
     // Agent mode 2 gets one goal per racer, scattered across the map (the
     // obstacle grid already guarantees every open cell is one connected
     // region, so any goal is reachable from anywhere - no special placement
-    // constraint is needed beyond spreading them out); agent mode 3 instead
-    // carves several separate cargo-lined goal LINES into its own map, built
-    // by js/agent3.js; every other strategy keeps the single shared goal
-    // nearest the map centre on the plain generated obstacle field.
+    // constraint is needed beyond spreading them out); agent modes 3 and 4
+    // instead carve several separate cargo-lined goal LINES into their own
+    // map (agent4 currently reuses agent3's generator - see js/agent4.js);
+    // every other strategy keeps the single shared goal nearest the map
+    // centre on the plain generated obstacle field.
     let goalCells;
-    if (isAgent3) {
-      this.blockGrid = agent3GenerateMap(MAP_SIZE, this.racerCount, Math.random);
+    if (usesLineMap) {
+      this.blockGrid = isAgent3
+        ? agent3GenerateMap(MAP_SIZE, this.racerCount, Math.random)
+        : agent4GenerateMap(MAP_SIZE, this.racerCount, Math.random);
       this.mapGoals = this.blockGrid.goals;
       goalCells = this.mapGoals.map((g) => ({ fx: g.bx, fy: g.by }));
       // The generated map can be larger than the shared MAP_SIZE default
@@ -708,13 +758,14 @@ export class Game {
       this.mapGoals = goalCells.map((c) => ({ bx: c.fx, by: c.fy }));
     }
     this.mapGoal = this.mapGoals[0];
-    this.mapCargo = isAgent3 ? this.blockGrid.cargo : [];
-    this.mapPlatforms = isAgent3 ? this.blockGrid.platforms : [];
-    // Agent mode 3's one-time, purely cosmetic finish celebration: once every
-    // racer has reached a goal, every completed line welds itself into one
-    // rigid body (a connector between each adjacent pair) and rolls together
-    // one cell toward its own open/entrance side, dragging each line's cargo
-    // out of its nook along with it. See _startAgent3Celebration.
+    this.mapCargo = usesLineMap ? this.blockGrid.cargo : [];
+    this.mapPlatforms = usesLineMap ? this.blockGrid.platforms : [];
+    // Agent modes 3 and 4's one-time, purely cosmetic finish celebration:
+    // once every racer has reached a goal, every completed line welds
+    // itself into one rigid body (a connector between each adjacent pair)
+    // and rolls together one cell toward its own open/entrance side,
+    // dragging each line's cargo out of its nook along with it. Shared
+    // between the two modes - see _startAgent3Celebration.
     this._agent3CelebrationStarted = false;
     this._agent3Connectors = [];
     this._agent3CargoTweens = [];
@@ -736,11 +787,14 @@ export class Game {
       starts.push({ fx: best.fx, fy: best.fy });
     }
 
-    // Agent modes 2 and 3's shared exploration state (visited + pooled
+    // Agent modes 2, 3, and 4's shared exploration state (visited + pooled
     // vision) lives in their own module alongside the whole mode's movement
-    // AI - js/agent2.js and js/agent3.js respectively.
+    // AI - js/agent2.js, js/agent3.js, and js/agent4.js respectively, each
+    // in its own game.agentNVisited/agentNSensed fields so no two modes ever
+    // share or clobber each other's memory.
     if (isAgent2) agent2SetupState(this, starts);
     if (isAgent3) agent3SetupState(this, starts);
+    if (isAgent4) agent4SetupState(this, starts);
 
     const cellSize = this.forwardStep;
     const blockStep = MAZE_RATIO * cellSize; // world distance between adjacent block centers
@@ -929,6 +983,14 @@ export class Game {
         this.scene.add(shadow);
         rolling = new RollingShape(this.rhombi, group);
       }
+      // Agent mode 4 introduces two robot types, told apart by their 8
+      // triangular faces only - white for type A, black for type B - laid
+      // on top of whatever the square faces are already colored (a racer's
+      // body tint, or racer 0's untouched rainbow palette). Which racer is
+      // which type is a placeholder even-split for now; the real assignment
+      // rule (and any behavioral difference between the two) is still open.
+      const robotType = isAgent4 ? (i % 2 === 0 ? 'A' : 'B') : null;
+      if (isAgent4) this._setTriangleColor(group, robotType === 'A' ? 0xffffff : 0x111111);
       const start = starts[i];
       const pathColor = new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.78, 0.52);
       const pathDots = new THREE.InstancedMesh(
@@ -967,8 +1029,9 @@ export class Game {
         status: 'solving',
         visitCounts: new Map([[`${start.fx},${start.fy}`, 1]]),
         trail: [{ fx: start.fx, fy: start.fy }],
-        assignedGoal: (isAgent2 || isAgent3) ? null : this.mapGoal,
+        assignedGoal: (isAgent2 || isAgent3 || isAgent4) ? null : this.mapGoal,
         claimedGoal: null,
+        robotType,
         pathColor,
         pathDots,
         pathGlow,
@@ -1029,11 +1092,13 @@ export class Game {
       next = this._chooseExplorationMove(racer);
     } else if (this.mapStrategy === 'agent') {
       next = this.agentGoalKnown ? this._chooseDiscoveredPathMove(racer) : this._chooseAgentExploreMove(racer);
-    } else if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3') {
-      next = this.mapStrategy === 'agent2' ? agent2ChooseMove(this, racer) : agent3ChooseMove(this, racer);
+    } else if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') {
+      if (this.mapStrategy === 'agent2') next = agent2ChooseMove(this, racer);
+      else if (this.mapStrategy === 'agent3') next = agent3ChooseMove(this, racer);
+      else next = agent4ChooseMove(this, racer);
       // Count consecutive rounds this racer couldn't move; a long streak means
       // it's wedged in a jam the yield/chain-yield logic can't rotate out of.
-      // agent2/3ChooseMove watch this and break the deadlock with a scatter.
+      // agent2/3/4ChooseMove watch this and break the deadlock with a scatter.
       if (!next) { racer.idleTicks = (racer.idleTicks || 0) + 1; return; }
     } else {
       next = this._choosePathMove(racer);
@@ -1068,13 +1133,17 @@ export class Game {
     racer.shape.startMove(dir);
     racer.pendingDir = dir;
 
-    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3') {
+    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') {
       // Mark the arrived cell as covered ground in the shared record and sense
       // from the new spot (both shared). If it's a goal, the racer has found
       // one - it stops right there.
-      const visited = this.mapStrategy === 'agent2' ? this.agent2Visited : this.agent3Visited;
+      const visited = this.mapStrategy === 'agent2' ? this.agent2Visited
+        : this.mapStrategy === 'agent3' ? this.agent3Visited
+        : this.agent4Visited;
       visited.add(`${racer.bx},${racer.by}`);
-      if (this.mapStrategy === 'agent2') agent2Sense(this, racer); else agent3Sense(this, racer);
+      if (this.mapStrategy === 'agent2') agent2Sense(this, racer);
+      else if (this.mapStrategy === 'agent3') agent3Sense(this, racer);
+      else agent4Sense(this, racer);
       if (this._isMapGoal(racer.bx, racer.by)) {
         racer.status = 'reached';
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
@@ -1378,7 +1447,7 @@ export class Game {
 
   _mapCellAvailable(x, y, racer) {
     if (!this.blockGrid.blockOpen(x, y)) return false;
-    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3') {
+    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') {
       // Any cell another racer stands on is taken - including one that has
       // stopped on a goal, which is a permanent obstacle to everyone else.
       return !this.mapRacers.some((other) => other !== racer && other.bx === x && other.by === y);
@@ -1581,7 +1650,7 @@ export class Game {
 
   _updateMapPathDots(racer, path) {
     if (!racer.pathDots) return;
-    const showsDots = this.mapStrategy === 'path' || this.mapStrategy === 'agent' || this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3';
+    const showsDots = this.mapStrategy === 'path' || this.mapStrategy === 'agent' || this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4';
     if (!showsDots || !path || path.length < 2) {
       racer.pathDots.count = 0;
       racer.pathGlow.count = 0;
@@ -1895,7 +1964,7 @@ export class Game {
           const p = racer.shape.group.position;
           racer.shadow.position.set(p.x, 0.02, p.z);
         }
-        if (this.mapStrategy === 'agent3') this._updateAgent3Celebration(dt);
+        if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
       }
       this._reportStats();
     }

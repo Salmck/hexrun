@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=103';
+import { Game } from './game.js?v=104';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -43,7 +43,7 @@ gametypeBtn.addEventListener('click', () => {
   racerCountSelect.value = String(game.racerCount);
 });
 
-const MAP_STRATEGY_LABEL = { path: 'A* 寻路', explore: '自主探索', agent: '智能体模式', agent2: '智能体模式2', agent3: '智能体模式3' };
+const MAP_STRATEGY_LABEL = { path: 'A* 寻路', explore: '自主探索', agent: '智能体模式', agent2: '智能体模式2', agent3: '智能体模式3', agent4: '智能体模式4' };
 mapStrategyBtn.addEventListener('click', () => {
   const strategy = game.toggleMapStrategy();
   mapStrategyBtn.textContent = MAP_STRATEGY_LABEL[strategy];
