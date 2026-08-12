@@ -1,8 +1,9 @@
 // Agent mode 4 - a variant of agent mode 2's swarm brain (shared vision,
 // blind exploration, A*-to-goal, BFS chain-yield) run against a very
 // different map: instead of one scattered goal cluster, the map carries
-// several separate GOAL LINES (straight runs of 2-5 goals), each lined on
-// one side with cargo crates (an obstacle, one type per line) and left
+// several separate GOAL LINES (straight runs of an ODD length - 1, 3, or 5
+// goals), each lined on one side with cargo crates (an obstacle, one type
+// per line, centred on the line - see pickCenteredCargoIndices) and left
 // completely open on the other side. Goal lines are kept well apart so
 // carving cargo into the base maze can never wall two of them together.
 //
@@ -338,25 +339,19 @@ function agent4ForceYield(game, parked) {
 // Map generation: several separate goal lines + one-sided cargo.
 // --------------------------------------------------------------------------
 
-// Random group sizes in [2,5] summing exactly to `total`, never leaving an
-// invalid size-1 remainder. A pure random pick can walk itself into a corner
-// where only 1 is left; when that happens the last pick is nudged so the
-// remainder becomes 2 (or the leftover 1 is folded into the previous group)
-// instead of ever emitting a line shorter than 2.
+// Random ODD group sizes (1, 3, or 5) summing exactly to `total`. Unlike
+// agent3's even-allowed partition, this never needs a remainder fix-up: 1 is
+// itself a valid size, so simply picking from {1,3,5} (capped by whatever's
+// left) at each step always has a legal move and always terminates exactly
+// on `total` - worst case, the rest fills in with 1s.
 function partitionGoalCounts(total) {
-  if (total <= 1) return total === 1 ? [1] : [];
   const sizes = [];
   let remaining = total;
-  while (remaining >= 2) {
+  while (remaining > 0) {
     const maxS = Math.min(5, remaining);
-    let s = 2 + Math.floor(Math.random() * (maxS - 1));
-    if (remaining - s === 1) s = s > 2 ? s - 1 : Math.min(3, maxS);
-    sizes.push(s);
-    remaining -= s;
-  }
-  if (remaining === 1) {
-    if (sizes.length && sizes[sizes.length - 1] < 5) sizes[sizes.length - 1] += 1;
-    else sizes.push(1);
+    const choices = [1, 3, 5].filter((s) => s <= maxS);
+    sizes.push(choices[Math.floor(Math.random() * choices.length)]);
+    remaining -= sizes[sizes.length - 1];
   }
   return sizes;
 }
@@ -452,6 +447,31 @@ function shuffleIndices(n) {
   return arr;
 }
 
+// Picks which of a line's `n` goal indices (n always odd) get cargo, kept
+// centred on the line rather than scattered anywhere along it:
+// - 1 cargo sits beside the line's exact middle goal.
+// - 2+ cargo: the two farthest-apart pieces are placed symmetrically about
+//   the centre (how far out is randomised, anywhere from adjacent-to-centre
+//   out to the line's own ends), and any remaining interior cargo is
+//   scattered randomly within that centred span - so the overall footprint
+//   is always centred even though the exact interior positions aren't.
+function pickCenteredCargoIndices(n, cargoCount) {
+  if (cargoCount <= 0) return new Set();
+  const center = (n - 1) / 2; // integer - n is always odd
+  if (cargoCount === 1) return new Set([center]);
+
+  const dMin = Math.ceil((cargoCount - 1) / 2); // enough interior room for the rest
+  const dMax = center; // the line's own ends
+  const d = dMin + Math.floor(Math.random() * (dMax - dMin + 1));
+  const idxs = new Set([center - d, center + d]);
+
+  const interiorPool = [];
+  for (let idx = center - d + 1; idx < center + d; idx++) interiorPool.push(idx);
+  const picks = shuffleIndices(interiorPool.length).slice(0, cargoCount - 2);
+  for (const p of picks) idxs.add(interiorPool[p]);
+  return idxs;
+}
+
 // Carves one line's cargo side and open side into `grid` (mutated in place,
 // true = open). The whole cargo-side edge (one cell out from every goal in
 // the line) is forced closed - some of those cells become actual cargo
@@ -484,7 +504,7 @@ function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformLi
 
   const maxCargo = Math.floor(n / 2);
   const cargoCount = maxCargo > 0 ? 1 + Math.floor(Math.random() * maxCargo) : 0;
-  const cargoIdxs = new Set(shuffleIndices(n).slice(0, cargoCount));
+  const cargoIdxs = pickCenteredCargoIndices(n, cargoCount);
   const kind = Math.random() < 0.5 ? 0 : 1;
   line.kind = kind;
 

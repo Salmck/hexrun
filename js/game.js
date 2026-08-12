@@ -5,7 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=1';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=2';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -968,6 +968,24 @@ export class Game {
       return marker;
     });
 
+    // Agent mode 4 introduces two robot types, told apart by their 8
+    // triangular faces only - white for type A, black for type B - laid on
+    // top of whatever the square faces are already colored (a racer's body
+    // tint, or racer 0's untouched rainbow palette). Exactly one type-B
+    // robot per goal line, the rest type A; which specific racers land on B
+    // is a random, otherwise-meaningless placeholder assignment for now -
+    // the real assignment rule (and any behavioral difference between the
+    // two types) is still open.
+    let agent4RobotTypes = null;
+    if (isAgent4) {
+      const lineCount = new Set(this.mapGoals.map((g) => g.groupId)).size;
+      agent4RobotTypes = Array.from({ length: this.racerCount }, (_, i) => (i < lineCount ? 'B' : 'A'));
+      for (let i = agent4RobotTypes.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [agent4RobotTypes[i], agent4RobotTypes[j]] = [agent4RobotTypes[j], agent4RobotTypes[i]];
+      }
+    }
+
     this.mapRacers = [];
     for (let i = 0; i < this.racerCount; i++) {
       let group, shadow, rolling;
@@ -983,13 +1001,7 @@ export class Game {
         this.scene.add(shadow);
         rolling = new RollingShape(this.rhombi, group);
       }
-      // Agent mode 4 introduces two robot types, told apart by their 8
-      // triangular faces only - white for type A, black for type B - laid
-      // on top of whatever the square faces are already colored (a racer's
-      // body tint, or racer 0's untouched rainbow palette). Which racer is
-      // which type is a placeholder even-split for now; the real assignment
-      // rule (and any behavioral difference between the two) is still open.
-      const robotType = isAgent4 ? (i % 2 === 0 ? 'A' : 'B') : null;
+      const robotType = isAgent4 ? agent4RobotTypes[i] : null;
       if (isAgent4) this._setTriangleColor(group, robotType === 'A' ? 0xffffff : 0x111111);
       const start = starts[i];
       const pathColor = new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.78, 0.52);
