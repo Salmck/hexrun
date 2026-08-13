@@ -5,7 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=3';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=4';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -825,10 +825,10 @@ export class Game {
 
     const groundGeo = new THREE.PlaneGeometry(maxX - minX, maxZ - minZ);
     let groundMat;
-    if (isAgent3) {
-      // Agent mode 3's "explored map" highlight is painted directly onto
-      // the ground's own texture (one canvas cell per block cell) rather
-      // than a second overlapping mesh at a slightly different height -
+    if (usesLineMap) {
+      // Agent modes 3 and 4's "explored map" highlight is painted directly
+      // onto the ground's own texture (one canvas cell per block cell)
+      // rather than a second overlapping mesh at a slightly different height -
       // two near-coplanar transparent surfaces fighting over draw order as
       // the camera moves is exactly what caused it to flicker, and z-fixing
       // it with a bigger offset would just be papering over the same

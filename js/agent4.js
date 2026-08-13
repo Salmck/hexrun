@@ -306,14 +306,18 @@ function pickTowardUnseen(game, racer, pool) {
 // BFS chain-yield within one goal line's 4-connected run (lines are >=10
 // apart, so this can never reach across into a different line). Identical
 // mechanics to agent2's version - see js/agent2.js for the full rationale,
-// with one addition: the search only ever traverses cells whose slotType
-// matches `parked`'s own robotType, so every racer this ever shuffles is
-// guaranteed to land on a slot it's actually allowed to settle on - never
-// bumping a type-A racer onto the line's one type-B (centre) slot or vice
-// versa.
+// with one addition: the search can walk across ANY goal in the line (not
+// just `parked`'s own slot type - restricting that too would refuse most
+// ordinary same-type shuffles too, any time the shortest chain happens to
+// pass a slot of the other type along the way), but each link in the found
+// chain is only actually taken if the cell that racer would slide into is
+// a slot its own type is allowed to settle on - so a chain that would
+// require bumping some racer onto the line's other type of slot is
+// rejected outright rather than executed.
 function agent4ChainYield(game, parked) {
-  const goalAt = (x, y) => game.mapGoals.some((g) => g.bx === x && g.by === y && g.slotType === parked.robotType);
+  const goalAt = (x, y) => game.mapGoals.some((g) => g.bx === x && g.by === y);
   const racerOn = (x, y) => game.mapRacers.find((r) => r.bx === x && r.by === y);
+  const slotTypeAt = (x, y) => game.mapGoals.find((g) => g.bx === x && g.by === y)?.slotType;
 
   const startK = `${parked.bx},${parked.by}`;
   const prev = new Map([[startK, null]]);
@@ -342,6 +346,7 @@ function agent4ChainYield(game, parked) {
   for (let i = 0; i < chain.length - 1; i++) {
     const r = racerOn(chain[i].bx, chain[i].by);
     if (!r || r.status !== 'reached' || r.shape.isBusy() || r.pendingDir) return false;
+    if (slotTypeAt(chain[i + 1].bx, chain[i + 1].by) !== r.robotType) return false;
   }
 
   for (let i = chain.length - 2; i >= 0; i--) {
@@ -358,16 +363,43 @@ function agent4ChainYield(game, parked) {
 // mid-animation), or - the case that matters most here - when there's no
 // alternate same-type slot for chain-yield to shuffle `parked` into at all
 // (always true for a type-B racer, since its line has only the one centre
-// slot). Otherwise identical mechanics to agent2's version, plus the
-// yield-cooldown stamp described where agent4ChooseMove reads it.
-function agent4ForceYield(game, parked) {
-  if (parked.shape.isBusy() || parked.pendingDir) return false;
-  const dest = DIRS
+// slot). Recurses through whoever is blocking `parked`'s own neighbours
+// first if none of them is immediately free, which becomes the common case
+// once a line is mostly full - by then every neighbour is likely occupied
+// by some OTHER already-reached racer too, and a version that only ever
+// looked at direct neighbours would just permanently fail from that point
+// on. Every racer this displaces (not just `parked` itself) gets the
+// yield-cooldown stamp agent4ChooseMove reads, so none of them race back
+// into place before the original crossing racer has actually gotten past.
+function agent4ForceYield(game, parked, visited) {
+  visited = visited || new Set();
+  if (parked.shape.isBusy() || parked.pendingDir || visited.has(parked.id) || visited.size > 6) return false;
+  visited.add(parked.id);
+  const wasReached = parked.status === 'reached';
+
+  const neighbors = DIRS
     .map(([dx, dy]) => ({ fx: parked.bx + dx, fy: parked.by + dy }))
-    .find((c) => game._mapCellAvailable(c.fx, c.fy, parked));
+    .filter((c) => game.blockGrid.blockOpen(c.fx, c.fy));
+
+  let dest = neighbors.find((c) => !game.mapRacers.some((o) => o.bx === c.fx && o.by === c.fy));
+  if (!dest) {
+    for (const c of neighbors) {
+      const occupant = game.mapRacers.find((o) => o.bx === c.fx && o.by === c.fy);
+      // Recurse through whatever's in the way regardless of its own status -
+      // a 'solving' racer sitting in the corridor is just as much a
+      // temporary obstacle here as an already-'reached' one.
+      if (occupant && agent4ForceYield(game, occupant, visited)) {
+        dest = c;
+        break;
+      }
+    }
+  }
   if (!dest) return false;
-  const gi = game.mapGoals.findIndex((g) => g.bx === parked.bx && g.by === parked.by);
-  if (gi >= 0) game.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+
+  if (wasReached) {
+    const gi = game.mapGoals.findIndex((g) => g.bx === parked.bx && g.by === parked.by);
+    if (gi >= 0) game.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+  }
   parked.path = null;
   parked.status = 'solving';
   parked._yieldCooldown = 8;
@@ -667,17 +699,17 @@ export function agent4GenerateMap(baseSize, taskCount, rng = Math.random) {
     const obstacleComponents = computeObstacleComponents(grid, size, size, cargoSet, platformSet);
     const blockOpen = (x, y) => inBounds(x, y, size, size) && grid[y][x];
 
-    // Every line's exact middle goal (line length is always odd) is the
-    // one type-B slot; every other goal on the line is type-A. This is
-    // what agent4ChooseMove uses to keep each robot type on its own kind
-    // of goal - see the slotType checks there and in agent4ChainYield.
+    // Exactly one goal per line is the type-B slot; every other goal on
+    // the line is type-A. Which one is picked at random along the line for
+    // now (not pinned to the centre) - see agent4ChooseMove/agent4ChainYield
+    // for how slotType keeps each robot type on its own kind of goal.
     const goals = [];
     for (const line of lines) {
-      const centerIdx = (line.cells.length - 1) / 2;
+      const bIdx = Math.floor(Math.random() * line.cells.length);
       line.cells.forEach((c, idx) => {
         goals.push({
           bx: c.fx, by: c.fy, groupId: line.groupId, openDir: line.openDir,
-          slotType: idx === centerIdx ? 'B' : 'A',
+          slotType: idx === bIdx ? 'B' : 'A',
         });
       });
     }
