@@ -5,7 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=2';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=3';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -71,6 +71,11 @@ export class Game {
     this.view = '3d';
     this.pendingGapMs = 0;
     this.racerCount = 4;
+    // Agent mode 4's racer-count select repurposes into a task-count
+    // control instead (see main.js) - each task is one goal line, and the
+    // session's actual racerCount is derived from however many goals that
+    // many lines end up carving (see _setupMapMode).
+    this.agent4TaskCount = 2;
     this.mapStrategy = 'path';
     this._cameraManualUntil = 0;
 
@@ -121,6 +126,14 @@ export class Game {
 
   getMaxRacers() {
     return this.gameType === 'map' ? MAP_MAX_RACERS : MAX_RACERS;
+  }
+
+  setAgent4TaskCount(count) {
+    const nextCount = Math.max(1, Math.min(4, Math.round(count) || 1));
+    if (nextCount === this.agent4TaskCount) return this.agent4TaskCount;
+    this.agent4TaskCount = nextCount;
+    this.reset();
+    return this.agent4TaskCount;
   }
 
   toggle() {
@@ -730,15 +743,19 @@ export class Game {
     // region, so any goal is reachable from anywhere - no special placement
     // constraint is needed beyond spreading them out); agent modes 3 and 4
     // instead carve several separate cargo-lined goal LINES into their own
-    // map (agent4 currently reuses agent3's generator - see js/agent4.js);
-    // every other strategy keeps the single shared goal nearest the map
-    // centre on the plain generated obstacle field.
+    // map; every other strategy keeps the single shared goal nearest the
+    // map centre on the plain generated obstacle field.
     let goalCells;
     if (usesLineMap) {
+      // agent3 is driven by a target racer count (it partitions that total
+      // into lines); agent4 is driven the other way around - the UI's task
+      // count directly picks the number of lines, and racerCount for the
+      // session is however many goals that produces, read back below.
       this.blockGrid = isAgent3
         ? agent3GenerateMap(MAP_SIZE, this.racerCount, Math.random)
-        : agent4GenerateMap(MAP_SIZE, this.racerCount, Math.random);
+        : agent4GenerateMap(MAP_SIZE, this.agent4TaskCount, Math.random);
       this.mapGoals = this.blockGrid.goals;
+      if (isAgent4) this.racerCount = this.mapGoals.length;
       goalCells = this.mapGoals.map((g) => ({ fx: g.bx, fy: g.by }));
       // The generated map can be larger than the shared MAP_SIZE default
       // when many small goal lines need room to stay >=10 cells apart -
@@ -1156,7 +1173,15 @@ export class Game {
       if (this.mapStrategy === 'agent2') agent2Sense(this, racer);
       else if (this.mapStrategy === 'agent3') agent3Sense(this, racer);
       else agent4Sense(this, racer);
-      if (this._isMapGoal(racer.bx, racer.by)) {
+      // Agent mode 4 only counts as "arrived" on a goal matching the
+      // racer's own robotType - every line has exactly one type-B (centre)
+      // slot and the rest are type-A, so a type-A racer passing through the
+      // centre goal on its way to its real target must not get latched
+      // there, and vice versa.
+      const atOwnGoal = this.mapStrategy === 'agent4'
+        ? this.mapGoals.some((g) => g.bx === racer.bx && g.by === racer.by && g.slotType === racer.robotType)
+        : this._isMapGoal(racer.bx, racer.by);
+      if (atOwnGoal) {
         racer.status = 'reached';
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
         const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);

@@ -1,10 +1,13 @@
 // Agent mode 4 - a variant of agent mode 2's swarm brain (shared vision,
 // blind exploration, A*-to-goal, BFS chain-yield) run against a very
 // different map: instead of one scattered goal cluster, the map carries
-// several separate GOAL LINES (straight runs of an ODD length - 1, 3, or 5
-// goals), each lined on one side with cargo crates (an obstacle, one type
-// per line, centred on the line - see pickCenteredCargoIndices) and left
-// completely open on the other side. Goal lines are kept well apart so
+// several separate GOAL LINES, one per "task" (straight runs of an ODD
+// length - 3 or 5 goals), each lined on one side with cargo crates (an
+// obstacle, one type per line, centred on the line - see
+// pickCenteredCargoIndices) and left completely open on the other side.
+// Every line's exact centre goal is a type-B slot, every other goal on it
+// is type-A - see the slotType field agent4GenerateMap puts on each goal
+// and how agent4ChooseMove uses it. Goal lines are kept well apart so
 // carving cargo into the base maze can never wall two of them together.
 //
 // The one real behavioural difference from agent2: with several separate
@@ -68,7 +71,26 @@ export function agent4ChooseMove(game, racer) {
     .map(([dx, dy]) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
     .filter((cell) => game._mapCellAvailable(cell.fx, cell.fy, racer));
 
-  const adjGoal = pool.find((cell) => game._isMapGoal(cell.fx, cell.fy));
+  // A racer just force-yielded out of its own slot (see agent4ForceYield)
+  // stays off it for a few ticks rather than immediately routing straight
+  // back in. Without this, a racer with no alternate slot to retreat to -
+  // the type-B centre slot has no sibling to swap into, unlike type-A's
+  // several per line - would dash back the instant it's evicted, racing
+  // whoever displaced it for the same cell and often winning, which turns
+  // one crossing attempt into a permanent back-and-forth instead of the
+  // brief, one-time detour it's meant to be.
+  if ((racer._yieldCooldown || 0) > 0) {
+    racer._yieldCooldown -= 1;
+    if (pool.length) return agent4ExploreStep(game, racer, pool);
+  }
+
+  // Every line has exactly one type-B slot (its centre goal - see
+  // agent4GenerateMap) and the rest are type-A slots. A racer only ever
+  // treats a goal as "arrived" if its own robotType matches that goal's
+  // slotType, so a type-A racer can walk straight through the centre goal
+  // of a line without mistakenly stopping there, and vice versa.
+  const ownGoalAt = (x, y) => game.mapGoals.find((g) => g.bx === x && g.by === y && g.slotType === racer.robotType);
+  const adjGoal = pool.find((cell) => ownGoalAt(cell.fx, cell.fy));
   if (adjGoal) return adjGoal;
 
   // Deadlock/congestion breaker, checked first so it actually gets to run
@@ -86,7 +108,15 @@ export function agent4ChooseMove(game, racer) {
     return cands[Math.floor(Math.random() * cands.length)];
   }
 
-  const knownGoals = game.mapGoals.filter((g) => game.agent4Sensed.has(`${g.bx},${g.by}`));
+  // Only a goal matching this racer's own robotType is ever a usable
+  // target - a type-A racer never routes toward a line's centre (type-B)
+  // slot, and a type-B racer never routes toward anything but a centre
+  // slot. Combined with there being exactly one type-B racer per line (see
+  // game.js's per-setup assignment), this is what actually makes each line
+  // end up with exactly one type-B occupant - it's not just a population
+  // count coincidence.
+  const knownGoals = game.mapGoals.filter((g) =>
+    g.slotType === racer.robotType && game.agent4Sensed.has(`${g.bx},${g.by}`));
   const isTaken = (g) => game.mapRacers.some(
     (o) => o !== racer && o.status === 'reached' && o.bx === g.bx && o.by === g.by);
   // Only a goal that is both known AND currently free is a usable target.
@@ -275,9 +305,14 @@ function pickTowardUnseen(game, racer, pool) {
 
 // BFS chain-yield within one goal line's 4-connected run (lines are >=10
 // apart, so this can never reach across into a different line). Identical
-// mechanics to agent2's version - see js/agent2.js for the full rationale.
+// mechanics to agent2's version - see js/agent2.js for the full rationale,
+// with one addition: the search only ever traverses cells whose slotType
+// matches `parked`'s own robotType, so every racer this ever shuffles is
+// guaranteed to land on a slot it's actually allowed to settle on - never
+// bumping a type-A racer onto the line's one type-B (centre) slot or vice
+// versa.
 function agent4ChainYield(game, parked) {
-  const goalAt = (x, y) => game.mapGoals.some((g) => g.bx === x && g.by === y);
+  const goalAt = (x, y) => game.mapGoals.some((g) => g.bx === x && g.by === y && g.slotType === parked.robotType);
   const racerOn = (x, y) => game.mapRacers.find((r) => r.bx === x && r.by === y);
 
   const startK = `${parked.bx},${parked.by}`;
@@ -320,7 +355,11 @@ function agent4ChainYield(game, parked) {
 }
 
 // Last-resort yield when chain-yield can't run this round (a link is
-// mid-animation). Identical mechanics to agent2's version.
+// mid-animation), or - the case that matters most here - when there's no
+// alternate same-type slot for chain-yield to shuffle `parked` into at all
+// (always true for a type-B racer, since its line has only the one centre
+// slot). Otherwise identical mechanics to agent2's version, plus the
+// yield-cooldown stamp described where agent4ChooseMove reads it.
 function agent4ForceYield(game, parked) {
   if (parked.shape.isBusy() || parked.pendingDir) return false;
   const dest = DIRS
@@ -331,6 +370,7 @@ function agent4ForceYield(game, parked) {
   if (gi >= 0) game.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
   parked.path = null;
   parked.status = 'solving';
+  parked._yieldCooldown = 8;
   game._applyMapMove(parked, dest);
   return true;
 }
@@ -339,21 +379,13 @@ function agent4ForceYield(game, parked) {
 // Map generation: several separate goal lines + one-sided cargo.
 // --------------------------------------------------------------------------
 
-// Random ODD group sizes (1, 3, or 5) summing exactly to `total`. Unlike
-// agent3's even-allowed partition, this never needs a remainder fix-up: 1 is
-// itself a valid size, so simply picking from {1,3,5} (capped by whatever's
-// left) at each step always has a legal move and always terminates exactly
-// on `total` - worst case, the rest fills in with 1s.
-function partitionGoalCounts(total) {
-  const sizes = [];
-  let remaining = total;
-  while (remaining > 0) {
-    const maxS = Math.min(5, remaining);
-    const choices = [1, 3, 5].filter((s) => s <= maxS);
-    sizes.push(choices[Math.floor(Math.random() * choices.length)]);
-    remaining -= sizes[sizes.length - 1];
-  }
-  return sizes;
+// One random size (3 or 5) per line, `taskCount` lines total - the UI's
+// "task count" IS the line count directly here, not something derived by
+// partitioning a target racer total the way agent3 does it. Total racer
+// count for the session falls out afterward as whatever the sum of these
+// sizes comes to (see agent4GenerateMap's return value).
+function pickLineSizes(taskCount) {
+  return Array.from({ length: taskCount }, () => (Math.random() < 0.5 ? 3 : 5));
 }
 
 // A working map big enough that `lineCount` goal lines can actually find
@@ -595,17 +627,20 @@ function computeObstacleComponents(grid, width, height, cargoSet, platformSet) {
 }
 
 // Builds a full agent4 map: a connected base obstacle field (reusing the
-// same generator every other strategy uses) with `racerCount` goals carved
-// in as several separate straight lines (2-5 goals each), each lined with
-// one-type cargo on a random side and left fully open on the other, all
-// lines kept >=MIN_LINE_GAP apart. Retries from a fresh random layout
-// (re-rolling the line-size partition too) until every constraint holds,
-// including - critically - that the WHOLE map stays one connected region,
-// so no racer can ever be sealed off from every goal.
-export function agent4GenerateMap(baseSize, racerCount, rng = Math.random) {
+// same generator every other strategy uses) with `taskCount` separate
+// straight goal lines carved in (each an odd length, 3 or 5 goals - see
+// pickLineSizes), each lined with one-type cargo centred on the line and
+// left fully open on the other side, all lines kept >=MIN_LINE_GAP apart.
+// Unlike agent3, `taskCount` IS the number of lines directly, not a racer
+// total to be partitioned - total racer count for the session is simply
+// however many goals fall out of the chosen line sizes (goals.length on
+// the returned object). Retries from a fresh random layout (re-rolling the
+// line sizes too) until every constraint holds, including - critically -
+// that the WHOLE map stays one connected region, so no racer can ever be
+// sealed off from every goal.
+export function agent4GenerateMap(baseSize, taskCount, rng = Math.random) {
   for (let attempt = 0; attempt < 60; attempt++) {
-    const sizes = partitionGoalCounts(Math.max(0, Math.round(racerCount)));
-    if (!sizes.length) continue;
+    const sizes = pickLineSizes(Math.max(1, Math.round(taskCount)));
     const size = neededMapSize(sizes.length, baseSize);
     const grid = buildTiledGrid(size, baseSize, rng);
 
@@ -632,8 +667,20 @@ export function agent4GenerateMap(baseSize, racerCount, rng = Math.random) {
     const obstacleComponents = computeObstacleComponents(grid, size, size, cargoSet, platformSet);
     const blockOpen = (x, y) => inBounds(x, y, size, size) && grid[y][x];
 
+    // Every line's exact middle goal (line length is always odd) is the
+    // one type-B slot; every other goal on the line is type-A. This is
+    // what agent4ChooseMove uses to keep each robot type on its own kind
+    // of goal - see the slotType checks there and in agent4ChainYield.
     const goals = [];
-    for (const line of lines) for (const c of line.cells) goals.push({ bx: c.fx, by: c.fy, groupId: line.groupId, openDir: line.openDir });
+    for (const line of lines) {
+      const centerIdx = (line.cells.length - 1) / 2;
+      line.cells.forEach((c, idx) => {
+        goals.push({
+          bx: c.fx, by: c.fy, groupId: line.groupId, openDir: line.openDir,
+          slotType: idx === centerIdx ? 'B' : 'A',
+        });
+      });
+    }
 
     return { blocksX: size, blocksY: size, blockOpen, openCells, obstacleComponents, goals, cargo, platforms };
   }
