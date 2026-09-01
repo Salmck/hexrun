@@ -5,7 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=6';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=7';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -71,11 +71,6 @@ export class Game {
     this.view = '3d';
     this.pendingGapMs = 0;
     this.racerCount = 4;
-    // Agent mode 4's racer-count select repurposes into a task-count
-    // control instead (see main.js) - each task is one goal line, and the
-    // session's actual racerCount is derived from however many goals that
-    // many lines end up carving (see _setupMapMode).
-    this.agent4TaskCount = 2;
     this.mapStrategy = 'path';
     this._cameraManualUntil = 0;
 
@@ -126,14 +121,6 @@ export class Game {
 
   getMaxRacers() {
     return this.gameType === 'map' ? MAP_MAX_RACERS : MAX_RACERS;
-  }
-
-  setAgent4TaskCount(count) {
-    const nextCount = Math.max(1, Math.min(4, Math.round(count) || 1));
-    if (nextCount === this.agent4TaskCount) return this.agent4TaskCount;
-    this.agent4TaskCount = nextCount;
-    this.reset();
-    return this.agent4TaskCount;
   }
 
   toggle() {
@@ -331,13 +318,6 @@ export class Game {
     const meshGroup = buildMesh(this.rhombi);
     meshGroup.position.set(0, this.apothem, 0);
     this.scene.add(meshGroup);
-    // Racer 0 reuses this one long-lived group across every mode/strategy
-    // switch (see _setupTrackMode/_setupMapMode below) rather than being
-    // rebuilt each time, so its original per-face rainbow palette is
-    // snapshotted once here - anything that overwrites part of it (agent
-    // mode 4's per-triangle robot-type tint) can be cleanly reverted by
-    // restoring from this snapshot instead of having to rebuild the mesh.
-    this._defaultRacer0Colors = meshGroup.children[0].geometry.attributes.color.array.slice();
 
     this.shapeShadow = this._makeBlobShadow(this.apothem * 1.15);
     this.shapeShadow.position.set(0, 0.02, 0);
@@ -389,7 +369,6 @@ export class Game {
       this.cameraOrbit.elevation = 0.46;
       this.cameraOrbit.radius = 168;
     }
-    this._resetRacer0Colors(); // undo any agent-mode-4 triangle tint left over from map mode
     this.finishOrder = [];
     this.trackLength = TRACK_LENGTH;
     this.obstacles = [];
@@ -488,39 +467,6 @@ export class Game {
       attr.setXYZ(i, base.r * variation, base.g * variation, base.b * variation);
     }
     attr.needsUpdate = true;
-  }
-
-  // Overwrites just the 8 triangular faces' vertex colors, leaving whatever
-  // is already on the 18 square faces (a racer's body tint, or racer 0's
-  // untouched rainbow palette) alone. Walks this.rhombi.faces in the same
-  // order buildMesh used to lay out the color attribute, so each face's
-  // vertex count (3 for a triangle, 6 for a square split into two tris)
-  // lines up with the right slice of the attribute array.
-  _setTriangleColor(group, hex) {
-    const mesh = group.children[0];
-    if (!mesh?.geometry?.attributes?.color) return;
-    const color = new THREE.Color(hex);
-    const attr = mesh.geometry.attributes.color;
-    let vi = 0;
-    for (const f of this.rhombi.faces) {
-      const vertCount = f.idxs.length === 3 ? 3 : 6;
-      if (f.type === 'triangle') {
-        for (let k = 0; k < vertCount; k++) attr.setXYZ(vi + k, color.r, color.g, color.b);
-      }
-      vi += vertCount;
-    }
-    attr.needsUpdate = true;
-  }
-
-  // Racer 0's mesh group is built once and reused across every mode and
-  // strategy switch (see _setupShape), so any per-triangle override applied
-  // to it (agent mode 4's robot-type tint) needs to be explicitly undone
-  // when leaving that mode, rather than the mesh being rebuilt fresh.
-  _resetRacer0Colors() {
-    const mesh = this.shape?.group?.children?.[0];
-    if (!mesh?.geometry?.attributes?.color || !this._defaultRacer0Colors) return;
-    mesh.geometry.attributes.color.array.set(this._defaultRacer0Colors);
-    mesh.geometry.attributes.color.needsUpdate = true;
   }
 
   _addRaceLine(row, checker) {
@@ -730,7 +676,6 @@ export class Game {
       this.cameraOrbit.elevation = 1.02;
       this.cameraOrbit.radius = 190;
     }
-    this._resetRacer0Colors(); // start from the pristine palette; agent mode 4 re-applies its tint below
     this.agentGoalKnown = false;
     this.agentTrail = null;
     const isAgent2 = this.mapStrategy === 'agent2';
@@ -747,15 +692,10 @@ export class Game {
     // map centre on the plain generated obstacle field.
     let goalCells;
     if (usesLineMap) {
-      // agent3 is driven by a target racer count (it partitions that total
-      // into lines); agent4 is driven the other way around - the UI's task
-      // count directly picks the number of lines, and racerCount for the
-      // session is however many goals that produces, read back below.
       this.blockGrid = isAgent3
         ? agent3GenerateMap(MAP_SIZE, this.racerCount, Math.random)
-        : agent4GenerateMap(MAP_SIZE, this.agent4TaskCount, Math.random);
+        : agent4GenerateMap(MAP_SIZE, this.racerCount, Math.random);
       this.mapGoals = this.blockGrid.goals;
-      if (isAgent4) this.racerCount = this.mapGoals.length;
       goalCells = this.mapGoals.map((g) => ({ fx: g.bx, fy: g.by }));
       // The generated map can be larger than the shared MAP_SIZE default
       // when many small goal lines need room to stay >=10 cells apart -
@@ -985,24 +925,6 @@ export class Game {
       return marker;
     });
 
-    // Agent mode 4 introduces two robot types, told apart by their 8
-    // triangular faces only - white for type A, black for type B - laid on
-    // top of whatever the square faces are already colored (a racer's body
-    // tint, or racer 0's untouched rainbow palette). Exactly one type-B
-    // robot per goal line, the rest type A; which specific racers land on B
-    // is a random, otherwise-meaningless placeholder assignment for now -
-    // the real assignment rule (and any behavioral difference between the
-    // two types) is still open.
-    let agent4RobotTypes = null;
-    if (isAgent4) {
-      const lineCount = new Set(this.mapGoals.map((g) => g.groupId)).size;
-      agent4RobotTypes = Array.from({ length: this.racerCount }, (_, i) => (i < lineCount ? 'B' : 'A'));
-      for (let i = agent4RobotTypes.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [agent4RobotTypes[i], agent4RobotTypes[j]] = [agent4RobotTypes[j], agent4RobotTypes[i]];
-      }
-    }
-
     this.mapRacers = [];
     for (let i = 0; i < this.racerCount; i++) {
       let group, shadow, rolling;
@@ -1018,8 +940,6 @@ export class Game {
         this.scene.add(shadow);
         rolling = new RollingShape(this.rhombi, group);
       }
-      const robotType = isAgent4 ? agent4RobotTypes[i] : null;
-      if (isAgent4) this._setTriangleColor(group, robotType === 'A' ? 0xffffff : 0x111111);
       const start = starts[i];
       const pathColor = new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.78, 0.52);
       const pathDots = new THREE.InstancedMesh(
@@ -1060,7 +980,6 @@ export class Game {
         trail: [{ fx: start.fx, fy: start.fy }],
         assignedGoal: (isAgent2 || isAgent3 || isAgent4) ? null : this.mapGoal,
         claimedGoal: null,
-        robotType,
         pathColor,
         pathDots,
         pathGlow,
@@ -1173,18 +1092,7 @@ export class Game {
       if (this.mapStrategy === 'agent2') agent2Sense(this, racer);
       else if (this.mapStrategy === 'agent3') agent3Sense(this, racer);
       else agent4Sense(this, racer);
-      // agent4 assigns robot types (A/B) per goal line, so not every goal
-      // cell is valid for every racer passing through it - a racer must
-      // stop only at the specific cell it actually locked in as its target
-      // (racer.agent4Target), not merely at any goal cell it steps on while
-      // routing toward that target (every cell in a goal line is itself a
-      // registered goal, so the generic "stepped on a goal" check below
-      // would let a racer latch prematurely onto a cell meant for another
-      // robot type, bypassing the type-reservation logic entirely).
-      const arrived = this.mapStrategy === 'agent4'
-        ? !!(racer.agent4Target && racer.bx === racer.agent4Target.bx && racer.by === racer.agent4Target.by)
-        : this._isMapGoal(racer.bx, racer.by);
-      if (arrived) {
+      if (this._isMapGoal(racer.bx, racer.by)) {
         racer.status = 'reached';
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
         const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);

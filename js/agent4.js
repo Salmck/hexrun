@@ -1,38 +1,11 @@
-// Agent mode 4 - a variant of agent mode 2's swarm brain (shared vision,
-// blind exploration, A*-to-goal, BFS chain-yield) run against a very
-// different map: instead of one scattered goal cluster, the map carries
-// several separate GOAL LINES, one per "task" (straight runs of an ODD
-// length - 3 or 5 goals), each lined on one side with cargo crates (an
-// obstacle, one type per line, centred on the line - see
-// pickCenteredCargoIndices) and left completely open on the other side.
-// Goal lines are kept well apart so carving cargo into the base maze can
-// never wall two of them together.
-//
-// Every racer is also one of two robot types, A or B (purely a body-colour
-// distinction elsewhere in game.js), with exactly one type-B racer per
-// line overall. Movement is otherwise unmodified agent3 behaviour - see
-// agent4ChooseMove for the two small, symmetric rules that are enough to
-// guarantee "one B per line" without pinning B to any particular position
-// on it: a type-B racer never targets a line that already has a type-B
-// racer reached OR already headed there, and a type-A racer never targets
-// a line that already has n-1 type-A racers reached or headed there
-// (reserving the last cell for whichever B eventually gets there). Both
-// counts include racers still travelling, not just ones that have already
-// arrived - counting arrivals only would let several racers each see
-// "room left" and all commit before any of them actually gets there,
-// overfilling the line anyway.
-//
-// The one real behavioural difference from agent2: with several separate
-// lines, a racer's nearest KNOWN goal can legitimately be a line that has
-// already filled up entirely while a different, not-yet-sensed line still
-// has room. So target selection here only ever routes toward a known goal
-// that is currently FREE; if every known goal is taken, it does NOT fall
-// back to fighting a full line (agent2 does) - it keeps exploring instead,
-// which is guaranteed to eventually turn up a line with room, since total
-// goals always equal the racer count.
-//
-// These are free functions taking the Game instance as `game`, exactly like
-// agent2.js; game.js keeps only the thin hooks that call into here.
+// Agent mode 4 - kept as its own decoupled module (own state, own exported
+// hooks) so it can diverge from agent mode 3 later without touching agent3's
+// code or state. For now it is an exact behavioural copy of agent3: same
+// shared-vision swarm brain (blind exploration, A*-to-goal, BFS chain-yield)
+// against the same several-separate-goal-lines-with-cargo map layout. See
+// js/agent3.js for the full rationale behind each piece below - this file
+// mirrors it line for line under its own agent4* names/state so the two
+// modes never share or clobber each other's memory.
 
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 
@@ -46,7 +19,7 @@ const MIN_LINE_GAP = 10;
 const MAX_MAP_SIZE = 61;
 
 // --------------------------------------------------------------------------
-// Shared state + vision (identical shape to agent2's, kept in separate
+// Shared state + vision (identical shape to agent3's, kept in separate
 // game.agent4Visited / game.agent4Sensed fields so the two modes never
 // share or clobber each other's memory).
 // --------------------------------------------------------------------------
@@ -83,51 +56,8 @@ export function agent4ChooseMove(game, racer) {
     .map(([dx, dy]) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
     .filter((cell) => game._mapCellAvailable(cell.fx, cell.fy, racer));
 
-  const isTaken = (g) => game.mapRacers.some(
-    (o) => o !== racer && o.status === 'reached' && o.bx === g.bx && o.by === g.by);
-
-  // The two small, symmetric rules that produce exactly one type-B racer
-  // per line without pinning type-B to any specific position on it (see
-  // the file header for the full rationale):
-  // - a type-B racer never targets a line that already has a type-B racer
-  //   reached OR already headed there;
-  // - a type-A racer never targets a line that already has n-1 type-A
-  //   racers reached or headed there, reserving the last cell for
-  //   whichever type-B racer eventually gets there instead.
-  // Counting only ARRIVALS ('reached') here would leave a real race: with
-  // several racers still travelling, each independently sees "plenty of
-  // room left" and all commit before any of them actually arrives, jointly
-  // overfilling a line anyway. racer.agent4Claim - the groupId a
-  // still-travelling racer currently has as its target, set below wherever
-  // `target`/`adjGoal` is chosen and cleared wherever this racer gives up
-  // on targeting anything - counts an in-flight commitment the same as an
-  // arrival, closing that gap.
-  const racerGroupId = (o) => {
-    if (o.status === 'reached') {
-      const g = game.mapGoals.find((gg) => gg.bx === o.bx && gg.by === o.by);
-      return g ? g.groupId : null;
-    }
-    return o.agent4Claim ?? null;
-  };
-  const committedCount = (groupId, type) => game.mapRacers.filter(
-    (o) => o !== racer && o.robotType === type && racerGroupId(o) === groupId).length;
-  const isUsableGoal = (g) => {
-    if (racer.robotType === 'B') return committedCount(g.groupId, 'B') === 0;
-    if (committedCount(g.groupId, 'B') > 0) return true; // this line's B is already spoken for
-    const lineSize = game.mapGoals.filter((gg) => gg.groupId === g.groupId).length;
-    return committedCount(g.groupId, 'A') < lineSize - 1;
-  };
-
-  const adjGoal = pool.find((cell) => {
-    const g = game.mapGoals.find((gg) => gg.bx === cell.fx && gg.by === cell.fy);
-    return g && isUsableGoal(g);
-  });
-  if (adjGoal) {
-    const g = game.mapGoals.find((gg) => gg.bx === adjGoal.fx && gg.by === adjGoal.fy);
-    racer.agent4Claim = g.groupId;
-    racer.agent4Target = { bx: g.bx, by: g.by };
-    return adjGoal;
-  }
+  const adjGoal = pool.find((cell) => game._isMapGoal(cell.fx, cell.fy));
+  if (adjGoal) return adjGoal;
 
   // Deadlock/congestion breaker, checked first so it actually gets to run
   // for the several ticks it's meant to last: a racer stuck despite having
@@ -136,8 +66,6 @@ export function agent4ChooseMove(game, racer) {
   // - otherwise a fresh A* replan just re-finds the same jammed route
   // immediately and the flag never gets consumed.
   if ((racer.scatterSteps || 0) > 0 && pool.length) {
-    racer.agent4Claim = null;
-    racer.agent4Target = null;
     racer.scatterSteps -= 1;
     racer.path = null;
     game._updateMapPathDots(racer, null);
@@ -146,7 +74,9 @@ export function agent4ChooseMove(game, racer) {
     return cands[Math.floor(Math.random() * cands.length)];
   }
 
-  const knownGoals = game.mapGoals.filter((g) => game.agent4Sensed.has(`${g.bx},${g.by}`) && isUsableGoal(g));
+  const knownGoals = game.mapGoals.filter((g) => game.agent4Sensed.has(`${g.bx},${g.by}`));
+  const isTaken = (g) => game.mapRacers.some(
+    (o) => o !== racer && o.status === 'reached' && o.bx === g.bx && o.by === g.by);
   // Only a goal that is both known AND currently free is a usable target.
   // With several separate lines, "nearest known" can easily be a line that
   // filled up while a farther, unsensed line still has room - routing there
@@ -163,8 +93,6 @@ export function agent4ChooseMove(game, racer) {
       const d = Math.abs(g.bx - racer.bx) + Math.abs(g.by - racer.by);
       if (d < bestD) { bestD = d; target = g; }
     }
-    racer.agent4Claim = target.groupId;
-    racer.agent4Target = { bx: target.bx, by: target.by };
 
     // Track real progress toward `target`, separately from idleTicks (which
     // only catches a racer that couldn't move AT ALL). A racer wedged in a
@@ -190,8 +118,6 @@ export function agent4ChooseMove(game, racer) {
       // loose instead of shuffling in place forever.
       racer.noProgressTicks = 0;
       racer.scatterSteps = 5; // one step consumed right here
-      racer.agent4Claim = null;
-      racer.agent4Target = null;
       racer.path = null;
       game._updateMapPathDots(racer, null);
       const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
@@ -234,16 +160,6 @@ export function agent4ChooseMove(game, racer) {
       return null;
     }
     // Target not reachable over sensed ground yet - fall through to explore.
-    // Deliberately NOT clearing racer.agent4Claim here: a route can fail to
-    // find a path for a single tick purely because it's temporarily blocked
-    // by a different line's obstacle, not because the target has actually
-    // stopped being this racer's real intent. Clearing it on every such
-    // blip would open a brief window each time where another racer's
-    // committedCount() undercounts this line and can slip in past the
-    // reservation - exactly the race the claim exists to prevent.
-  } else {
-    racer.agent4Claim = null;
-    racer.agent4Target = null;
   }
 
   racer.path = null;
@@ -348,8 +264,6 @@ function pickTowardUnseen(game, racer, pool) {
 // BFS chain-yield within one goal line's 4-connected run (lines are >=10
 // apart, so this can never reach across into a different line). Identical
 // mechanics to agent2's version - see js/agent2.js for the full rationale.
-// No type-of-slot concept at all here - any reached racer can be shuffled
-// to any other free goal on the line, exactly like agent3.
 function agent4ChainYield(game, parked) {
   const goalAt = (x, y) => game.mapGoals.some((g) => g.bx === x && g.by === y);
   const racerOn = (x, y) => game.mapRacers.find((r) => r.bx === x && r.by === y);
@@ -413,13 +327,27 @@ function agent4ForceYield(game, parked) {
 // Map generation: several separate goal lines + one-sided cargo.
 // --------------------------------------------------------------------------
 
-// One random size (3 or 5) per line, `taskCount` lines total - the UI's
-// "task count" IS the line count directly here, not something derived by
-// partitioning a target racer total the way agent3 does it. Total racer
-// count for the session falls out afterward as whatever the sum of these
-// sizes comes to (see agent4GenerateMap's return value).
-function pickLineSizes(taskCount) {
-  return Array.from({ length: taskCount }, () => (Math.random() < 0.5 ? 3 : 5));
+// Random group sizes in [2,5] summing exactly to `total`, never leaving an
+// invalid size-1 remainder. A pure random pick can walk itself into a corner
+// where only 1 is left; when that happens the last pick is nudged so the
+// remainder becomes 2 (or the leftover 1 is folded into the previous group)
+// instead of ever emitting a line shorter than 2.
+function partitionGoalCounts(total) {
+  if (total <= 1) return total === 1 ? [1] : [];
+  const sizes = [];
+  let remaining = total;
+  while (remaining >= 2) {
+    const maxS = Math.min(5, remaining);
+    let s = 2 + Math.floor(Math.random() * (maxS - 1));
+    if (remaining - s === 1) s = s > 2 ? s - 1 : Math.min(3, maxS);
+    sizes.push(s);
+    remaining -= s;
+  }
+  if (remaining === 1) {
+    if (sizes.length && sizes[sizes.length - 1] < 5) sizes[sizes.length - 1] += 1;
+    else sizes.push(1);
+  }
+  return sizes;
 }
 
 // A working map big enough that `lineCount` goal lines can actually find
@@ -513,31 +441,6 @@ function shuffleIndices(n) {
   return arr;
 }
 
-// Picks which of a line's `n` goal indices (n always odd) get cargo, kept
-// centred on the line rather than scattered anywhere along it:
-// - 1 cargo sits beside the line's exact middle goal.
-// - 2+ cargo: the two farthest-apart pieces are placed symmetrically about
-//   the centre (how far out is randomised, anywhere from adjacent-to-centre
-//   out to the line's own ends), and any remaining interior cargo is
-//   scattered randomly within that centred span - so the overall footprint
-//   is always centred even though the exact interior positions aren't.
-function pickCenteredCargoIndices(n, cargoCount) {
-  if (cargoCount <= 0) return new Set();
-  const center = (n - 1) / 2; // integer - n is always odd
-  if (cargoCount === 1) return new Set([center]);
-
-  const dMin = Math.ceil((cargoCount - 1) / 2); // enough interior room for the rest
-  const dMax = center; // the line's own ends
-  const d = dMin + Math.floor(Math.random() * (dMax - dMin + 1));
-  const idxs = new Set([center - d, center + d]);
-
-  const interiorPool = [];
-  for (let idx = center - d + 1; idx < center + d; idx++) interiorPool.push(idx);
-  const picks = shuffleIndices(interiorPool.length).slice(0, cargoCount - 2);
-  for (const p of picks) idxs.add(interiorPool[p]);
-  return idxs;
-}
-
 // Carves one line's cargo side and open side into `grid` (mutated in place,
 // true = open). The whole cargo-side edge (one cell out from every goal in
 // the line) is forced closed - some of those cells become actual cargo
@@ -570,7 +473,7 @@ function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformLi
 
   const maxCargo = Math.floor(n / 2);
   const cargoCount = maxCargo > 0 ? 1 + Math.floor(Math.random() * maxCargo) : 0;
-  const cargoIdxs = pickCenteredCargoIndices(n, cargoCount);
+  const cargoIdxs = new Set(shuffleIndices(n).slice(0, cargoCount));
   const kind = Math.random() < 0.5 ? 0 : 1;
   line.kind = kind;
 
@@ -661,20 +564,17 @@ function computeObstacleComponents(grid, width, height, cargoSet, platformSet) {
 }
 
 // Builds a full agent4 map: a connected base obstacle field (reusing the
-// same generator every other strategy uses) with `taskCount` separate
-// straight goal lines carved in (each an odd length, 3 or 5 goals - see
-// pickLineSizes), each lined with one-type cargo centred on the line and
-// left fully open on the other side, all lines kept >=MIN_LINE_GAP apart.
-// Unlike agent3, `taskCount` IS the number of lines directly, not a racer
-// total to be partitioned - total racer count for the session is simply
-// however many goals fall out of the chosen line sizes (goals.length on
-// the returned object). Retries from a fresh random layout (re-rolling the
-// line sizes too) until every constraint holds, including - critically -
-// that the WHOLE map stays one connected region, so no racer can ever be
-// sealed off from every goal.
-export function agent4GenerateMap(baseSize, taskCount, rng = Math.random) {
+// same generator every other strategy uses) with `racerCount` goals carved
+// in as several separate straight lines (2-5 goals each), each lined with
+// one-type cargo on a random side and left fully open on the other, all
+// lines kept >=MIN_LINE_GAP apart. Retries from a fresh random layout
+// (re-rolling the line-size partition too) until every constraint holds,
+// including - critically - that the WHOLE map stays one connected region,
+// so no racer can ever be sealed off from every goal.
+export function agent4GenerateMap(baseSize, racerCount, rng = Math.random) {
   for (let attempt = 0; attempt < 60; attempt++) {
-    const sizes = pickLineSizes(Math.max(1, Math.round(taskCount)));
+    const sizes = partitionGoalCounts(Math.max(0, Math.round(racerCount)));
+    if (!sizes.length) continue;
     const size = neededMapSize(sizes.length, baseSize);
     const grid = buildTiledGrid(size, baseSize, rng);
 
@@ -701,10 +601,6 @@ export function agent4GenerateMap(baseSize, taskCount, rng = Math.random) {
     const obstacleComponents = computeObstacleComponents(grid, size, size, cargoSet, platformSet);
     const blockOpen = (x, y) => inBounds(x, y, size, size) && grid[y][x];
 
-    // No per-goal type distinction here - which specific cell a type-B
-    // racer ends up on is left unconstrained; see agent4ChooseMove for how
-    // "one type-B racer per line" is enforced without pinning it to a
-    // particular position.
     const goals = [];
     for (const line of lines) for (const c of line.cells) goals.push({ bx: c.fx, by: c.fy, groupId: line.groupId, openDir: line.openDir });
 
