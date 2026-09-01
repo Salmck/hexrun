@@ -5,7 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=5';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=6';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -1173,7 +1173,18 @@ export class Game {
       if (this.mapStrategy === 'agent2') agent2Sense(this, racer);
       else if (this.mapStrategy === 'agent3') agent3Sense(this, racer);
       else agent4Sense(this, racer);
-      if (this._isMapGoal(racer.bx, racer.by)) {
+      // agent4 assigns robot types (A/B) per goal line, so not every goal
+      // cell is valid for every racer passing through it - a racer must
+      // stop only at the specific cell it actually locked in as its target
+      // (racer.agent4Target), not merely at any goal cell it steps on while
+      // routing toward that target (every cell in a goal line is itself a
+      // registered goal, so the generic "stepped on a goal" check below
+      // would let a racer latch prematurely onto a cell meant for another
+      // robot type, bypassing the type-reservation logic entirely).
+      const arrived = this.mapStrategy === 'agent4'
+        ? !!(racer.agent4Target && racer.bx === racer.agent4Target.bx && racer.by === racer.agent4Target.by)
+        : this._isMapGoal(racer.bx, racer.by);
+      if (arrived) {
         racer.status = 'reached';
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
         const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);

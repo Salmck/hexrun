@@ -10,14 +10,17 @@
 //
 // Every racer is also one of two robot types, A or B (purely a body-colour
 // distinction elsewhere in game.js), with exactly one type-B racer per
-// line overall. Movement is otherwise identical for both types - see
-// agent4ChooseMove for the two small, symmetric carve-outs that are enough
-// to guarantee that "one B per line" without pinning B to any particular
-// position on it: a type-B racer never targets a line that already has a
-// reached type-B racer on it, and a type-A racer never takes the LAST free
-// goal on a line that doesn't have its B yet (reserving it for whichever
-// B eventually gets there). Every other routing rule - chain-yield,
-// force-yield, exploration - is unmodified agent3 behaviour.
+// line overall. Movement is otherwise unmodified agent3 behaviour - see
+// agent4ChooseMove for the two small, symmetric rules that are enough to
+// guarantee "one B per line" without pinning B to any particular position
+// on it: a type-B racer never targets a line that already has a type-B
+// racer reached OR already headed there, and a type-A racer never targets
+// a line that already has n-1 type-A racers reached or headed there
+// (reserving the last cell for whichever B eventually gets there). Both
+// counts include racers still travelling, not just ones that have already
+// arrived - counting arrivals only would let several racers each see
+// "room left" and all commit before any of them actually gets there,
+// overfilling the line anyway.
 //
 // The one real behavioural difference from agent2: with several separate
 // lines, a racer's nearest KNOWN goal can legitimately be a line that has
@@ -82,30 +85,49 @@ export function agent4ChooseMove(game, racer) {
 
   const isTaken = (g) => game.mapRacers.some(
     (o) => o !== racer && o.status === 'reached' && o.bx === g.bx && o.by === g.by);
+
   // The two small, symmetric rules that produce exactly one type-B racer
   // per line without pinning type-B to any specific position on it (see
   // the file header for the full rationale):
-  // - a type-B racer never targets a line that already has a reached
-  //   type-B racer on it;
-  // - a type-A racer never takes the LAST free goal on a line that
-  //   doesn't have its B yet, reserving that one cell for whichever B
-  //   eventually gets there instead.
-  // Every other goal is fair game for either type, exactly like agent3.
-  const lineHasReachedB = (groupId) => game.mapRacers.some((o) =>
-    o.robotType === 'B' && o.status === 'reached' &&
-    game.mapGoals.some((g) => g.groupId === groupId && g.bx === o.bx && g.by === o.by));
+  // - a type-B racer never targets a line that already has a type-B racer
+  //   reached OR already headed there;
+  // - a type-A racer never targets a line that already has n-1 type-A
+  //   racers reached or headed there, reserving the last cell for
+  //   whichever type-B racer eventually gets there instead.
+  // Counting only ARRIVALS ('reached') here would leave a real race: with
+  // several racers still travelling, each independently sees "plenty of
+  // room left" and all commit before any of them actually arrives, jointly
+  // overfilling a line anyway. racer.agent4Claim - the groupId a
+  // still-travelling racer currently has as its target, set below wherever
+  // `target`/`adjGoal` is chosen and cleared wherever this racer gives up
+  // on targeting anything - counts an in-flight commitment the same as an
+  // arrival, closing that gap.
+  const racerGroupId = (o) => {
+    if (o.status === 'reached') {
+      const g = game.mapGoals.find((gg) => gg.bx === o.bx && gg.by === o.by);
+      return g ? g.groupId : null;
+    }
+    return o.agent4Claim ?? null;
+  };
+  const committedCount = (groupId, type) => game.mapRacers.filter(
+    (o) => o !== racer && o.robotType === type && racerGroupId(o) === groupId).length;
   const isUsableGoal = (g) => {
-    if (racer.robotType === 'B') return !lineHasReachedB(g.groupId);
-    if (lineHasReachedB(g.groupId)) return true;
-    const freeInLine = game.mapGoals.filter((gg) => gg.groupId === g.groupId && !isTaken(gg)).length;
-    return freeInLine > 1;
+    if (racer.robotType === 'B') return committedCount(g.groupId, 'B') === 0;
+    if (committedCount(g.groupId, 'B') > 0) return true; // this line's B is already spoken for
+    const lineSize = game.mapGoals.filter((gg) => gg.groupId === g.groupId).length;
+    return committedCount(g.groupId, 'A') < lineSize - 1;
   };
 
   const adjGoal = pool.find((cell) => {
     const g = game.mapGoals.find((gg) => gg.bx === cell.fx && gg.by === cell.fy);
     return g && isUsableGoal(g);
   });
-  if (adjGoal) return adjGoal;
+  if (adjGoal) {
+    const g = game.mapGoals.find((gg) => gg.bx === adjGoal.fx && gg.by === adjGoal.fy);
+    racer.agent4Claim = g.groupId;
+    racer.agent4Target = { bx: g.bx, by: g.by };
+    return adjGoal;
+  }
 
   // Deadlock/congestion breaker, checked first so it actually gets to run
   // for the several ticks it's meant to last: a racer stuck despite having
@@ -114,6 +136,8 @@ export function agent4ChooseMove(game, racer) {
   // - otherwise a fresh A* replan just re-finds the same jammed route
   // immediately and the flag never gets consumed.
   if ((racer.scatterSteps || 0) > 0 && pool.length) {
+    racer.agent4Claim = null;
+    racer.agent4Target = null;
     racer.scatterSteps -= 1;
     racer.path = null;
     game._updateMapPathDots(racer, null);
@@ -139,6 +163,8 @@ export function agent4ChooseMove(game, racer) {
       const d = Math.abs(g.bx - racer.bx) + Math.abs(g.by - racer.by);
       if (d < bestD) { bestD = d; target = g; }
     }
+    racer.agent4Claim = target.groupId;
+    racer.agent4Target = { bx: target.bx, by: target.by };
 
     // Track real progress toward `target`, separately from idleTicks (which
     // only catches a racer that couldn't move AT ALL). A racer wedged in a
@@ -164,6 +190,8 @@ export function agent4ChooseMove(game, racer) {
       // loose instead of shuffling in place forever.
       racer.noProgressTicks = 0;
       racer.scatterSteps = 5; // one step consumed right here
+      racer.agent4Claim = null;
+      racer.agent4Target = null;
       racer.path = null;
       game._updateMapPathDots(racer, null);
       const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
@@ -206,6 +234,16 @@ export function agent4ChooseMove(game, racer) {
       return null;
     }
     // Target not reachable over sensed ground yet - fall through to explore.
+    // Deliberately NOT clearing racer.agent4Claim here: a route can fail to
+    // find a path for a single tick purely because it's temporarily blocked
+    // by a different line's obstacle, not because the target has actually
+    // stopped being this racer's real intent. Clearing it on every such
+    // blip would open a brief window each time where another racer's
+    // committedCount() undercounts this line and can slip in past the
+    // reservation - exactly the race the claim exists to prevent.
+  } else {
+    racer.agent4Claim = null;
+    racer.agent4Target = null;
   }
 
   racer.path = null;
