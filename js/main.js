@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=113';
+import { Game } from './game.js?v=114';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -12,6 +12,13 @@ const resetBtn = document.getElementById('btn-reset');
 const speedSelect = document.getElementById('speed');
 const racerCountSelect = document.getElementById('racer-count');
 const racerLabelText = document.getElementById('racer-label-text');
+const agent4MapSizeLabel = document.getElementById('agent4-mapsize-label');
+const agent4MapSizeInput = document.getElementById('agent4-mapsize');
+const agent4SeedLabel = document.getElementById('agent4-seed-label');
+const agent4SeedInput = document.getElementById('agent4-seed');
+const saveMapBtn = document.getElementById('btn-save-map');
+const openMapBtn = document.getElementById('btn-open-map');
+const openMapFile = document.getElementById('open-map-file');
 
 const game = new Game(canvas, {
   onStats: (stats) => {
@@ -46,6 +53,15 @@ const syncRacerControl = () => {
   racerLabelText.textContent = isAgent4 ? '任务数量' : '参赛物体';
   racerCountSelect.max = String(isAgent4 ? 4 : game.getMaxRacers());
   racerCountSelect.value = String(isAgent4 ? game.agent4TaskCount : game.racerCount);
+
+  agent4MapSizeLabel.hidden = !isAgent4;
+  agent4SeedLabel.hidden = !isAgent4;
+  saveMapBtn.hidden = !isAgent4;
+  openMapBtn.hidden = !isAgent4;
+  if (isAgent4) {
+    agent4MapSizeInput.value = String(game.agent4MapSize);
+    agent4SeedInput.value = String(game.agent4Seed);
+  }
 };
 syncRacerControl();
 
@@ -85,3 +101,48 @@ const applyRacerCount = () => {
 };
 racerCountSelect.addEventListener('input', applyRacerCount);
 racerCountSelect.addEventListener('change', applyRacerCount);
+
+const applyAgent4MapSize = () => {
+  if (agent4MapSizeInput.value === '') return;
+  const size = game.setAgent4MapSize(Number(agent4MapSizeInput.value));
+  agent4MapSizeInput.value = String(size);
+};
+agent4MapSizeInput.addEventListener('input', applyAgent4MapSize);
+agent4MapSizeInput.addEventListener('change', applyAgent4MapSize);
+
+const applyAgent4Seed = () => {
+  if (agent4SeedInput.value === '') return;
+  const seed = game.setAgent4Seed(Number(agent4SeedInput.value));
+  agent4SeedInput.value = String(seed);
+};
+agent4SeedInput.addEventListener('input', applyAgent4Seed);
+agent4SeedInput.addEventListener('change', applyAgent4Seed);
+
+saveMapBtn.addEventListener('click', () => {
+  game.saveAgent4Map();
+});
+
+openMapBtn.addEventListener('click', () => {
+  openMapFile.value = '';
+  openMapFile.click();
+});
+
+openMapFile.addEventListener('change', async () => {
+  const file = openMapFile.files && openMapFile.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    game.loadAgent4MapConfig(text);
+    gametypeBtn.textContent = game.gameType === 'track' ? '赛道模式' : '地图模式';
+    mapStrategyBtn.hidden = game.gameType !== 'map';
+    mapStrategyBtn.textContent = MAP_STRATEGY_LABEL[game.mapStrategy];
+    syncRacerControl();
+    if (!game.running) {
+      game.toggle();
+      toggleBtn.textContent = '暂停';
+    }
+  } catch (err) {
+    console.error('Failed to load agent-4 map file:', err);
+    window.alert('地图文件读取失败：' + err.message);
+  }
+});

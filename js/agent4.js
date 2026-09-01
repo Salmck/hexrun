@@ -43,9 +43,42 @@ const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 // Goal lines must stay at least this many cells apart (Manhattan, nearest
 // cell to nearest cell) so carving cargo and the open side into the base
 // maze around one line can never reach into another line's territory, and
-// so the endgame's per-line congestion never bleeds across lines.
-const MIN_LINE_GAP = 10;
+// so the endgame's per-line congestion never bleeds across lines. This is a
+// calibration reference, not used directly - computeLineGap scales it to
+// whatever map size is actually configured, so a small custom map doesn't
+// need lines a fixed 10 cells apart to fit any goal at all.
+const MIN_LINE_GAP_AT_REFERENCE_SIZE = 10;
+const REFERENCE_MAP_SIZE = 21;
 const MAX_MAP_SIZE = 61;
+
+// generateObstacleGrid (maze.js) needs enough total cells to ever reach its
+// own "at least 14 separate obstacle components, >=16% blocked" thresholds
+// at all - empirically, 9x9 and smaller NEVER succeed (not even a chance of
+// it: too few cells to form 14 components from), while 12x12 and up succeed
+// essentially every time. So however small a map size is requested, the
+// actual generation floor never goes below this - a hard structural limit
+// of the shared generator, not something agent4 can meaningfully work
+// around.
+const MIN_GENERATABLE_SIZE = 12;
+
+// A tiny deterministic PRNG (mulberry32): given the same integer seed, this
+// produces the exact same sequence of [0,1) floats every time, in every
+// browser. Used to make a whole agent-4 run - map layout, spawn positions,
+// robot-type assignment, and every routing tie-break during play - fully
+// reproducible from just (seed, map size, task count): see
+// Game#_setupMapMode, which creates one of these per reset and threads it
+// through both map generation (agent4GenerateMap) and every Math.random()
+// call in the movement AI below.
+export function agent4CreateRng(seed) {
+  let a = seed >>> 0;
+  return function agent4Rng() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 // --------------------------------------------------------------------------
 // Shared state + vision (identical shape to agent3's, kept in separate
@@ -80,6 +113,7 @@ function markSensed(game, x, y) {
 
 export function agent4ChooseMove(game, racer) {
   agent4Sense(game, racer);
+  const rng = game.agent4Rng || Math.random;
 
   const pool = DIRS
     .map(([dx, dy]) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
@@ -120,7 +154,7 @@ export function agent4ChooseMove(game, racer) {
     game._updateMapPathDots(racer, null);
     const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
     const cands = fwd.length ? fwd : pool;
-    return cands[Math.floor(Math.random() * cands.length)];
+    return cands[Math.floor(rng() * cands.length)];
   }
 
   const knownGoals = game.mapGoals.filter((g) => game.agent4Sensed.has(`${g.bx},${g.by}`));
@@ -178,7 +212,7 @@ export function agent4ChooseMove(game, racer) {
       game._updateMapPathDots(racer, null);
       const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
       const cands = fwd.length ? fwd : pool;
-      return cands.length ? cands[Math.floor(Math.random() * cands.length)] : null;
+      return cands.length ? cands[Math.floor(rng() * cands.length)] : null;
     }
 
     // A* plans over sensed WALLS only - except a cell held by a settled
@@ -231,7 +265,7 @@ export function agent4ChooseMove(game, racer) {
     racer.scatterSteps -= 1;
     const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
     const cands = fwd.length ? fwd : pool;
-    return cands[Math.floor(Math.random() * cands.length)];
+    return cands[Math.floor(rng() * cands.length)];
   }
 
   return agent4ExploreStep(game, racer, pool);
@@ -314,7 +348,8 @@ function pickTowardUnseen(game, racer, pool) {
   const most = Math.max(...pool.map(unseenAround));
   pool = pool.filter((cell) => unseenAround(cell) === most);
 
-  return pool[Math.floor(Math.random() * pool.length)];
+  const rng = game.agent4Rng || Math.random;
+  return pool[Math.floor(rng() * pool.length)];
 }
 
 // BFS chain-yield within one goal line's 4-connected run (lines are >=10
@@ -388,8 +423,8 @@ function agent4ForceYield(game, parked) {
 // (see agent4GenerateMap), not a target racer-count total to partition, and
 // every line must come out odd-length so it always has an exact center cell
 // for pickCenteredCargoIndices below to anchor on.
-function pickLineSizes(taskCount) {
-  return Array.from({ length: taskCount }, () => (Math.random() < 0.5 ? 3 : 5));
+function pickLineSizes(taskCount, rng) {
+  return Array.from({ length: taskCount }, () => (rng() < 0.5 ? 3 : 5));
 }
 
 // Chooses which `cargoCount` of a (always odd-length) line's `n` cells sit
@@ -397,7 +432,7 @@ function pickLineSizes(taskCount) {
 // the middle cell; two or more put the farthest-apart pair symmetrically
 // around the center (as far out as the line allows) and scatter any
 // remaining crates randomly in the span between them.
-function pickCenteredCargoIndices(n, cargoCount) {
+function pickCenteredCargoIndices(n, cargoCount, rng) {
   const center = (n - 1) / 2;
   if (cargoCount <= 0) return new Set();
   if (cargoCount === 1) return new Set([center]);
@@ -409,7 +444,7 @@ function pickCenteredCargoIndices(n, cargoCount) {
       if (!idxs.has(i)) interior.push(i);
     }
     for (let i = interior.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = Math.floor(rng() * (i + 1));
       [interior[i], interior[j]] = [interior[j], interior[i]];
     }
     for (const idx of interior.slice(0, cargoCount - 2)) idxs.add(idx);
@@ -417,15 +452,25 @@ function pickCenteredCargoIndices(n, cargoCount) {
   return idxs;
 }
 
+// Scales the reference gap (10 cells, tuned for the original fixed 21-cell
+// map) down for a smaller custom map size, so a small map doesn't need
+// lines a fixed 10 cells apart to fit any goal line at all. Floored at 2 so
+// it never collapses to "any distance is fine" on a tiny map.
+function computeLineGap(mapSize) {
+  return Math.max(2, Math.round((mapSize * MIN_LINE_GAP_AT_REFERENCE_SIZE) / REFERENCE_MAP_SIZE));
+}
+
 // A working map big enough that `lineCount` goal lines can actually find
-// mutually-10-apart placements. A handful of lines fit the default size
-// easily; many small lines (a high racer count split into lots of 2-runs)
-// need a visibly larger map, scaled by how many roughly-10-apart slots have
-// to fit on each axis.
-function neededMapSize(lineCount, baseSize) {
-  if (lineCount <= 4) return baseSize;
+// mutually-`gap`-apart placements, that a single max-length (5-cell) line
+// can be placed at all past its margin, and that generateObstacleGrid can
+// reliably build it in the first place (MIN_GENERATABLE_SIZE). A handful of
+// lines fit `baseSize` easily; many lines need a visibly larger map, scaled
+// by how many roughly-gap-apart slots have to fit on each axis.
+function neededMapSize(lineCount, baseSize, gap) {
+  const minForOneLine = Math.max(MIN_GENERATABLE_SIZE, 2 * 2 + 5); // margin (2 each side) + longest line (5)
+  if (lineCount <= 1) return Math.max(baseSize, minForOneLine);
   const perAxis = Math.ceil(Math.sqrt(lineCount));
-  return Math.min(MAX_MAP_SIZE, Math.max(baseSize, perAxis * MIN_LINE_GAP + 8));
+  return Math.min(MAX_MAP_SIZE, Math.max(baseSize, minForOneLine, perAxis * gap + 8));
 }
 
 // generateObstacleGrid's "every open cell is one connected region" check gets
@@ -437,7 +482,16 @@ function neededMapSize(lineCount, baseSize) {
 // construction: every generateObstacleGrid patch already has its whole
 // border ring open, so adjacent patches always meet along an open seam, and
 // each patch's own interior already connects out to that open border.
+//
+// When the canvas is no bigger than one tile (the common case for a small
+// custom map size, or a single goal line on any size), skip tiling
+// entirely and generate the canvas directly at its exact size instead -
+// cropping a smaller canvas out of one bigger generated tile would only
+// keep that corner's OWN connectivity by luck, not by construction, since
+// generateObstacleGrid only guarantees the full tile it was asked for is
+// one connected region.
 function buildTiledGrid(canvasSize, baseSize, rng) {
+  if (canvasSize <= baseSize) return generateObstacleGrid(canvasSize, canvasSize, rng).grid;
   const tilesPerSide = Math.ceil(canvasSize / baseSize);
   const tiles = Array.from({ length: tilesPerSide }, () =>
     Array.from({ length: tilesPerSide }, () => generateObstacleGrid(baseSize, baseSize, rng).grid)
@@ -470,30 +524,30 @@ function minCellDistance(a, b) {
 
 // Finds one straight run of `n` cells (horizontal or vertical, orientation
 // picked at random) that (a) stays clear of the map edge by enough margin to
-// carve cargo and the open side around it, and (b) sits at least
-// MIN_LINE_GAP away from every already-placed line. Purely random trial and
-// error over the whole grid - simple, and the map is generated fresh on
-// failure anyway (see agent4GenerateMap), so no fancier packing is needed.
-function placeOneLine(width, height, n, existingLines) {
+// carve cargo and the open side around it, and (b) sits at least `gap` away
+// from every already-placed line. Purely random trial and error over the
+// whole grid - simple, and the map is generated fresh on failure anyway (see
+// agent4GenerateMap), so no fancier packing is needed.
+function placeOneLine(width, height, n, existingLines, gap, rng) {
   const margin = 2;
   for (let tries = 0; tries < 500; tries++) {
-    const horizontal = Math.random() < 0.5;
+    const horizontal = rng() < 0.5;
     let cells;
     if (horizontal) {
-      const fy = margin + Math.floor(Math.random() * Math.max(1, height - 2 * margin));
+      const fy = margin + Math.floor(rng() * Math.max(1, height - 2 * margin));
       const fxRange = width - 2 * margin - (n - 1);
       if (fxRange <= 0) continue;
-      const fx = margin + Math.floor(Math.random() * fxRange);
+      const fx = margin + Math.floor(rng() * fxRange);
       cells = Array.from({ length: n }, (_, i) => ({ fx: fx + i, fy }));
     } else {
-      const fx = margin + Math.floor(Math.random() * Math.max(1, width - 2 * margin));
+      const fx = margin + Math.floor(rng() * Math.max(1, width - 2 * margin));
       const fyRange = height - 2 * margin - (n - 1);
       if (fyRange <= 0) continue;
-      const fy = margin + Math.floor(Math.random() * fyRange);
+      const fy = margin + Math.floor(rng() * fyRange);
       cells = Array.from({ length: n }, (_, i) => ({ fx, fy: fy + i }));
     }
     if (cells.some((c) => c.fx < margin || c.fx >= width - margin || c.fy < margin || c.fy >= height - margin)) continue;
-    if (existingLines.some((line) => minCellDistance(line.cells, cells) < MIN_LINE_GAP)) continue;
+    if (existingLines.some((line) => minCellDistance(line.cells, cells) < gap)) continue;
     return { cells, horizontal };
   }
   return null;
@@ -516,10 +570,10 @@ function placeOneLine(width, height, n, existingLines) {
 // design - see game.js's _startAgent3Celebration), so the platform is safe
 // to butt right up against the goal with no special-cased collision check
 // needed at that point.
-function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformList) {
+function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformList, rng) {
   const n = line.cells.length;
   const perpPair = line.horizontal ? [[0, -1], [0, 1]] : [[-1, 0], [1, 0]];
-  const side = Math.random() < 0.5 ? perpPair[0] : perpPair[1];
+  const side = rng() < 0.5 ? perpPair[0] : perpPair[1];
   const otherSide = side === perpPair[0] ? perpPair[1] : perpPair[0];
   const [pdx, pdy] = side;
   const [odx, ody] = otherSide;
@@ -530,9 +584,9 @@ function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformLi
   line.openDir = { dx: odx, dy: ody };
 
   const maxCargo = Math.floor(n / 2);
-  const cargoCount = maxCargo > 0 ? 1 + Math.floor(Math.random() * maxCargo) : 0;
-  const cargoIdxs = pickCenteredCargoIndices(n, cargoCount);
-  const kind = Math.random() < 0.5 ? 0 : 1;
+  const cargoCount = maxCargo > 0 ? 1 + Math.floor(rng() * maxCargo) : 0;
+  const cargoIdxs = pickCenteredCargoIndices(n, cargoCount, rng);
+  const kind = rng() < 0.5 ? 0 : 1;
   line.kind = kind;
 
   for (let i = 0; i < n; i++) {
@@ -625,21 +679,38 @@ function computeObstacleComponents(grid, width, height, cargoSet, platformSet) {
 // same generator every other strategy uses) with `taskCount` separate goal
 // lines carved in, one per task, each an odd length (3 or 5 goals) with its
 // cargo centered on the line, lined with one-type cargo on a random side and
-// left fully open on the other, all lines kept >=MIN_LINE_GAP apart. Retries
-// from a fresh random layout (re-rolling the line sizes too) until every
-// constraint holds, including - critically - that the WHOLE map stays one
-// connected region, so no racer can ever be sealed off from every goal.
+// left fully open on the other, all lines kept a gap apart that's scaled to
+// `baseSize` (see computeLineGap). Retries from a fresh random layout
+// (re-rolling the line sizes too) until every constraint holds, including -
+// critically - that the WHOLE map stays one connected region, so no racer
+// can ever be sealed off from every goal.
+//
+// `baseSize` is the user's preferred map edge length (Game#agent4MapSize) -
+// a floor, not a hard cap: neededMapSize silently grows the actual canvas
+// beyond it when the requested task count needs more room than that to fit
+// every line with its gap. `rng` (from Game#agent4Rng, made by
+// agent4CreateRng) makes the whole thing - this map, plus every subsequent
+// spawn position, robot-type assignment, and movement tie-break during play
+// - fully reproducible from just (seed, baseSize, taskCount).
 export function agent4GenerateMap(baseSize, taskCount, rng = Math.random) {
+  // `base` keeps the user's raw preference for gap scaling (so an 8 still
+  // means a proportionally small gap between lines); `tileSize` is the
+  // separate, always->=MIN_GENERATABLE_SIZE granularity buildTiledGrid
+  // actually generates each patch at, since that's a hard requirement of
+  // the shared generator regardless of what the user asked for.
+  const base = Math.max(4, Math.round(baseSize) || 4);
+  const tileSize = Math.max(base, MIN_GENERATABLE_SIZE);
+  const gap = computeLineGap(base);
   for (let attempt = 0; attempt < 60; attempt++) {
-    const sizes = pickLineSizes(Math.max(1, Math.round(taskCount)));
+    const sizes = pickLineSizes(Math.max(1, Math.round(taskCount)), rng);
     if (!sizes.length) continue;
-    const size = neededMapSize(sizes.length, baseSize);
-    const grid = buildTiledGrid(size, baseSize, rng);
+    const size = neededMapSize(sizes.length, base, gap);
+    const grid = buildTiledGrid(size, tileSize, rng);
 
     const lines = [];
     let ok = true;
     for (let gi = 0; gi < sizes.length; gi++) {
-      const placed = placeOneLine(size, size, sizes[gi], lines);
+      const placed = placeOneLine(size, size, sizes[gi], lines, gap, rng);
       if (!placed) { ok = false; break; }
       placed.groupId = gi;
       lines.push(placed);
@@ -648,7 +719,7 @@ export function agent4GenerateMap(baseSize, taskCount, rng = Math.random) {
 
     const cargo = [];
     const platforms = [];
-    for (const line of lines) carveCargoAndEmptySide(grid, size, size, line, cargo, platforms);
+    for (const line of lines) carveCargoAndEmptySide(grid, size, size, line, cargo, platforms, rng);
 
     const openCells = [];
     for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (grid[y][x]) openCells.push({ fx: x, fy: y });

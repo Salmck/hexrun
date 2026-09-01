@@ -35,6 +35,17 @@
         <span id="racer-label-text">参赛物体</span>
         <input id="racer-count" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" />
       </label>
+      <label id="agent4-mapsize-label" hidden>
+        地图边长
+        <input id="agent4-mapsize" type="number" min="4" max="40" step="1" value="8" inputmode="numeric" />
+      </label>
+      <label id="agent4-seed-label" hidden>
+        随机因子
+        <input id="agent4-seed" type="number" step="1" value="-1" inputmode="numeric" title="-1 表示每次随机" />
+      </label>
+      <button id="btn-save-map" type="button" hidden>保存地图</button>
+      <button id="btn-open-map" type="button" hidden>打开地图</button>
+      <input id="open-map-file" type="file" accept="application/json" hidden style="display:none" />
       <label id="speed-label">
         速度
         <select id="speed">
@@ -46,6 +57,6 @@
     </div>
   </div>
 
-  <script type="module" src="js/main.js?v=113"></script>
+  <script type="module" src="js/main.js?v=114"></script>
 </body>
 </html>

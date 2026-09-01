@@ -5,7 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=10';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng } from './agent4.js?v=12';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -76,6 +76,18 @@ export class Game {
     // session's actual racerCount is derived from however many goals that
     // many lines end up carving (see _setupMapMode).
     this.agent4TaskCount = 2;
+    // Agent mode 4's own configurable map edge length (a floor, not a hard
+    // cap - see agent4.js's neededMapSize) and RNG seed. -1 means "pick a
+    // fresh random seed every reset"; any other integer reuses that exact
+    // seed. With the seed, map size, and task count all fixed, a whole run
+    // - map layout, spawn positions, robot-type assignment, and every
+    // movement tie-break - is fully reproducible; see _setupMapMode, which
+    // creates the actual agent4Rng from this seed each reset, and
+    // agent4LastSeed, which records whichever seed actually got used (even
+    // when this was -1) so a random run can still be saved/reproduced.
+    this.agent4MapSize = 8;
+    this.agent4Seed = -1;
+    this.agent4LastSeed = null;
     this.mapStrategy = 'path';
     this._cameraManualUntil = 0;
 
@@ -134,6 +146,149 @@ export class Game {
     this.agent4TaskCount = nextCount;
     this.reset();
     return this.agent4TaskCount;
+  }
+
+  setAgent4MapSize(size) {
+    const nextSize = Math.max(4, Math.min(40, Math.round(size) || 4));
+    if (nextSize === this.agent4MapSize) return this.agent4MapSize;
+    this.agent4MapSize = nextSize;
+    this.reset();
+    return this.agent4MapSize;
+  }
+
+  // -1 means "random every reset"; any other (whole) number pins the exact
+  // seed used from then on, making every subsequent reset reproduce the
+  // identical map/spawn/routing given the same map size and task count.
+  setAgent4Seed(seed) {
+    const n = Math.round(seed);
+    const nextSeed = Number.isFinite(n) ? Math.max(-1, n) : -1;
+    if (nextSeed === this.agent4Seed) return this.agent4Seed;
+    this.agent4Seed = nextSeed;
+    this.reset();
+    return this.agent4Seed;
+  }
+
+  // Saves the current agent-mode-4 map as two downloaded files: a small
+  // JSON recipe (map size, task count, and the EXACT seed this run used -
+  // agent4LastSeed, not agent4Seed, so a "-1 = random" run is still saved
+  // reproducibly) that loadAgent4MapConfig can turn back into the identical
+  // map/spawn/routing, and a PNG snapshot of the current layout for a quick
+  // visual reference. Only meaningful in agent4 mode.
+  saveAgent4Map() {
+    if (this.mapStrategy !== 'agent4') return;
+    const stamp = `${this.agent4MapSize}x${this.agent4MapSize}-t${this.agent4TaskCount}-seed${this.agent4LastSeed}`;
+    const config = {
+      kind: 'hexrun-agent4-map',
+      version: 1,
+      mapSize: this.agent4MapSize,
+      taskCount: this.agent4TaskCount,
+      seed: this.agent4LastSeed,
+    };
+    this._downloadText(`hexrun-agent4-map-${stamp}.json`, JSON.stringify(config, null, 2), 'application/json');
+    const canvas = this._agent4RenderMapCanvas();
+    if (canvas) this._downloadDataUrl(`hexrun-agent4-map-${stamp}.png`, canvas.toDataURL('image/png'));
+  }
+
+  // Parses and applies a map recipe previously produced by saveAgent4Map,
+  // switching into agent mode 4 first if the game isn't already there, then
+  // regenerating so the loaded map/spawn/routing exactly reproduce the
+  // saved one (same seed, size, and task count in -> same everything out).
+  loadAgent4MapConfig(raw) {
+    const cfg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!cfg || cfg.kind !== 'hexrun-agent4-map') {
+      throw new Error('Not a hexrun agent-4 map file');
+    }
+    this.agent4MapSize = Math.max(4, Math.min(40, Math.round(cfg.mapSize) || 8));
+    this.agent4TaskCount = Math.max(1, Math.min(4, Math.round(cfg.taskCount) || 1));
+    const seed = Math.round(cfg.seed);
+    this.agent4Seed = Number.isFinite(seed) ? seed : -1;
+    if (this.gameType !== 'map') this.switchGameType('map');
+    if (this.mapStrategy !== 'agent4') {
+      let s = this.mapStrategy;
+      for (let i = 0; i < 8 && s !== 'agent4'; i++) s = this.toggleMapStrategy();
+    } else {
+      this.reset();
+    }
+  }
+
+  _downloadText(filename, text, mimeType) {
+    this._downloadDataUrl(filename, `data:${mimeType};charset=utf-8,${encodeURIComponent(text)}`);
+  }
+
+  _downloadDataUrl(filename, dataUrl) {
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  // A self-contained top-down schematic of the current agent-4 map, drawn
+  // straight from game-state data (blockGrid/mapGoals/mapCargo/mapPlatforms/
+  // mapRacers) onto an offscreen canvas - not a screenshot of the live 3D or
+  // 2D view, so it works regardless of which one is on screen and always
+  // reflects the map exactly (walls, every goal line in its own color,
+  // cargo, platforms, and every racer's current position/type/color).
+  _agent4RenderMapCanvas() {
+    if (!this.blockGrid || !this.mapGoals) return null;
+    const { blocksX, blocksY, blockOpen } = this.blockGrid;
+    const cell = Math.max(4, Math.min(18, Math.floor(720 / Math.max(blocksX, blocksY))));
+    const pad = 8;
+    const headerH = 28;
+    const canvas = document.createElement('canvas');
+    canvas.width = blocksX * cell + pad * 2;
+    canvas.height = blocksY * cell + pad * 2 + headerH;
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#f4f6fa';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#1c2430';
+    ctx.font = '13px monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(
+      `hexrun agent4  size=${this.agent4MapSize}  task=${this.agent4TaskCount}  seed=${this.agent4LastSeed}`,
+      pad, 8
+    );
+
+    const ox = pad, oy = pad + headerH;
+    for (let y = 0; y < blocksY; y++) {
+      for (let x = 0; x < blocksX; x++) {
+        ctx.fillStyle = blockOpen(x, y) ? '#eef1f5' : '#5b6178';
+        ctx.fillRect(ox + x * cell, oy + y * cell, cell, cell);
+      }
+    }
+
+    const LINE_COLORS = ['#e0673d', '#3d9de0', '#5cb85c', '#c9a33d', '#9b6bd6', '#3dc9c0'];
+    for (const g of this.mapGoals) {
+      ctx.fillStyle = LINE_COLORS[g.groupId % LINE_COLORS.length];
+      ctx.fillRect(ox + g.bx * cell, oy + g.by * cell, cell, cell);
+    }
+    for (const c of this.mapCargo || []) {
+      ctx.fillStyle = c.kind === 1 ? '#2f5fa8' : '#a87a2f';
+      const m = Math.max(1, Math.floor(cell * 0.2));
+      ctx.fillRect(ox + c.bx * cell + m, oy + c.by * cell + m, cell - 2 * m, cell - 2 * m);
+    }
+    for (const p of this.mapPlatforms || []) {
+      ctx.fillStyle = '#8a93ab';
+      ctx.fillRect(ox + p.bx * cell, oy + p.by * cell, cell, cell);
+    }
+
+    for (const r of this.mapRacers || []) {
+      const cx = ox + r.bx * cell + cell / 2;
+      const cy = oy + r.by * cell + cell / 2;
+      const hue = (r.id / this.mapRacers.length) % 1;
+      ctx.fillStyle = `hsl(${Math.round(hue * 360)}, 65%, 55%)`;
+      ctx.beginPath();
+      ctx.arc(cx, cy, cell * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = r.robotType === 'B' ? '#111111' : '#ffffff';
+      ctx.beginPath();
+      ctx.arc(cx, cy, cell * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    return canvas;
   }
 
   toggle() {
@@ -753,6 +908,17 @@ export class Game {
     const isAgent4 = this.mapStrategy === 'agent4';
     const usesLineMap = isAgent3 || isAgent4; // both build the cargo-lined goal LINE layout
 
+    // One seeded RNG per reset, used for everything agent-4-random this run
+    // (map layout, spawn positions, robot-type assignment, and every
+    // movement tie-break in agent4.js) so the whole run is reproducible
+    // from (agent4LastSeed, agent4MapSize, agent4TaskCount) alone. -1 picks
+    // a fresh seed here and remembers it in agent4LastSeed so even a
+    // "random" run can be saved and reproduced afterward.
+    if (isAgent4) {
+      this.agent4LastSeed = this.agent4Seed === -1 ? Math.floor(Math.random() * 2 ** 31) : this.agent4Seed;
+      this.agent4Rng = agent4CreateRng(this.agent4LastSeed);
+    }
+
     // Agent mode 2 gets one goal per racer, scattered across the map (the
     // obstacle grid already guarantees every open cell is one connected
     // region, so any goal is reachable from anywhere - no special placement
@@ -768,14 +934,15 @@ export class Game {
       // session is however many goals that produces, read back below.
       this.blockGrid = isAgent3
         ? agent3GenerateMap(MAP_SIZE, this.racerCount, Math.random)
-        : agent4GenerateMap(MAP_SIZE, this.agent4TaskCount, Math.random);
+        : agent4GenerateMap(this.agent4MapSize, this.agent4TaskCount, this.agent4Rng);
       this.mapGoals = this.blockGrid.goals;
       if (isAgent4) this.racerCount = this.mapGoals.length;
       goalCells = this.mapGoals.map((g) => ({ fx: g.bx, fy: g.by }));
-      // The generated map can be larger than the shared MAP_SIZE default
-      // when many small goal lines need room to stay >=10 cells apart -
-      // pull the camera back proportionally so the whole thing stays in view.
-      if (this.cameraOrbit) this.cameraOrbit.radius = 190 * (this.blockGrid.blocksX / MAP_SIZE);
+      // The generated map can be larger than its nominal base size when
+      // many/gapped goal lines need more room than that to fit - pull the
+      // camera back proportionally so the whole thing stays in view.
+      const nominalSize = isAgent3 ? MAP_SIZE : this.agent4MapSize;
+      if (this.cameraOrbit) this.cameraOrbit.radius = 190 * (this.blockGrid.blocksX / nominalSize);
     } else {
       this.blockGrid = generateObstacleGrid(MAP_SIZE, MAP_SIZE, Math.random);
       if (isAgent2) {
@@ -1014,7 +1181,7 @@ export class Game {
       const lineCount = new Set(this.mapGoals.map((g) => g.groupId)).size;
       agent4RobotTypes = Array.from({ length: this.racerCount }, (_, i) => (i < lineCount ? 'B' : 'A'));
       for (let i = agent4RobotTypes.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = Math.floor(this.agent4Rng() * (i + 1));
         [agent4RobotTypes[i], agent4RobotTypes[j]] = [agent4RobotTypes[j], agent4RobotTypes[i]];
       }
     }
