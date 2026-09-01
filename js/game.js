@@ -5,7 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=8';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=9';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -490,12 +490,27 @@ export class Game {
     attr.needsUpdate = true;
   }
 
+  // Overwrites every one of the 26 faces (all vertices) to one flat color,
+  // no per-vertex shading variation - agent mode 4 calls this on every
+  // racer, including racer 0, before _setTriangleColor below re-tints just
+  // the 8 triangular faces on top to mark robot type, so a racer's body
+  // reads as a single solid color distinct from every other racer's.
+  _setSolidColor(group, hex) {
+    const mesh = group.children[0];
+    if (!mesh?.geometry?.attributes?.color) return;
+    const color = new THREE.Color(hex);
+    const attr = mesh.geometry.attributes.color;
+    for (let i = 0; i < attr.count; i++) attr.setXYZ(i, color.r, color.g, color.b);
+    attr.needsUpdate = true;
+  }
+
   // Overwrites just the 8 triangular faces' vertex colors, leaving whatever
-  // is already on the 18 square faces (a racer's body tint, or racer 0's
-  // untouched rainbow palette) alone. Walks this.rhombi.faces in the same
-  // order buildMesh used to lay out the color attribute, so each face's
-  // vertex count (3 for a triangle, 6 for a square split into two tris)
-  // lines up with the right slice of the attribute array.
+  // is already on the 18 square faces (agent mode 4's solid body color, a
+  // non-agent4 racer's body tint, or racer 0's untouched rainbow palette)
+  // alone. Walks this.rhombi.faces in the same order buildMesh used to lay
+  // out the color attribute, so each face's vertex count (3 for a triangle,
+  // 6 for a square split into two tris) lines up with the right slice of
+  // the attribute array.
   _setTriangleColor(group, hex) {
     const mesh = group.children[0];
     if (!mesh?.geometry?.attributes?.color) return;
@@ -1013,14 +1028,22 @@ export class Game {
         rolling = this.shape;
       } else {
         group = buildMesh(this.rhombi);
-        this._tintShape(group, RACER_COLORS[i % RACER_COLORS.length]);
+        if (!isAgent4) this._tintShape(group, RACER_COLORS[i % RACER_COLORS.length]);
         this.scene.add(group);
         shadow = this._makeBlobShadow(this.apothem * 1.15);
         this.scene.add(shadow);
         rolling = new RollingShape(this.rhombi, group);
       }
       const robotType = isAgent4 ? agent4RobotTypes[i] : null;
-      if (isAgent4) this._setTriangleColor(group, robotType === 'A' ? 0xffffff : 0x111111);
+      if (isAgent4) {
+        // Every racer's body (all 26 faces) gets one flat, solid color, spread
+        // evenly around the hue wheel so all racerCount bodies stay visibly
+        // distinct even well past RACER_COLORS's own length - the type-A/B
+        // triangle tint below is layered on top of this, not instead of it.
+        const bodyHue = (i / this.racerCount) % 1;
+        this._setSolidColor(group, new THREE.Color().setHSL(bodyHue, 0.65, 0.55).getHex());
+        this._setTriangleColor(group, robotType === 'A' ? 0xffffff : 0x111111);
+      }
       const start = starts[i];
       const pathColor = new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.78, 0.52);
       const pathDots = new THREE.InstancedMesh(

@@ -1,27 +1,27 @@
 // Agent mode 4 - kept as its own decoupled module (own state, own exported
 // hooks) so it can diverge from agent mode 3 without touching agent3's code
 // or state. The movement AI (blind exploration, A*-to-goal, BFS chain-yield)
-// is currently an exact behavioural copy of agent3's - see js/agent3.js for
-// the full rationale behind that part - deliberately unchanged: every racer
-// still paths toward whatever known, free goal is nearest, with no
-// distinction between robot types.
+// is agent3's, unchanged, for type-A racers - see js/agent3.js for the full
+// rationale behind that part.
 //
-// What IS different from agent3 is the map itself and, cosmetically, the
-// racers on it:
+// What's different from agent3 is the map, the racers' cosmetic split into
+// two "robot types", and one small routing rule for type B:
 // - Driven by a task COUNT (1-4, one task = one goal line), not a target
 //   racer-count total to partition - see agent4GenerateMap. The session's
 //   actual racer count is whatever those lines add up to, read back by the
 //   caller once the map is built.
 // - Every goal line is odd-length (3 or 5 goals), and its cargo is kept
 //   centered on the line - see pickLineSizes and pickCenteredCargoIndices.
-// - Racers are cosmetically split into two "robot types", A and B, told
-//   apart only by their 8 triangular faces (white vs black - see game.js's
-//   _setTriangleColor); the number of type-B racers always equals the
-//   number of goal lines (one B's worth per task). This is a population
-//   count only, assigned once at setup - which specific racer lands on B is
-//   an otherwise-meaningless random pick, and it has no effect on routing:
-//   type A and B chase goals identically, exactly like agent3. Any real
-//   behavioral difference between the two types is a separate, later step.
+// - Racers are split into two "robot types", A and B, told apart by their 8
+//   triangular faces (white vs black - see game.js's _setTriangleColor) as
+//   well as by a solid, per-racer body color; the number of type-B racers
+//   always equals the number of goal lines (one B's worth per task) - a
+//   population count only, assigned once at setup, so which specific racer
+//   lands on B is an otherwise-meaningless random pick.
+// - Type A chases goals exactly like agent3, no restriction at all. Type B
+//   does the same EXCEPT it won't target a goal on a line that already has
+//   a type-B racer settled on it - see the lineHasReachedB check in
+//   agent4ChooseMove for why this is a soft preference, not a reservation.
 
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 
@@ -72,7 +72,27 @@ export function agent4ChooseMove(game, racer) {
     .map(([dx, dy]) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
     .filter((cell) => game._mapCellAvailable(cell.fx, cell.fy, racer));
 
-  const adjGoal = pool.find((cell) => game._isMapGoal(cell.fx, cell.fy));
+  // A type-B racer's only routing difference from type A (and from plain
+  // agent3): it won't target a goal line that already has a type-B racer
+  // settled on it - it just keeps looking elsewhere instead, exactly as if
+  // that whole line weren't known/free yet. This is a soft preference, not
+  // a reservation - nothing stops two B's converging on the same still-open
+  // line at once, and nothing guarantees every line ends up with one - so
+  // there's no claim/commit bookkeeping needed, and the existing "no known
+  // free goal -> keep exploring" fallback below already covers a B that
+  // temporarily has nowhere it's willing to go.
+  const lineHasReachedB = (groupId) => game.mapRacers.some((o) => {
+    if (o.robotType !== 'B' || o.status !== 'reached') return false;
+    const og = game.mapGoals.find((gg) => gg.bx === o.bx && gg.by === o.by);
+    return og && og.groupId === groupId;
+  });
+
+  const adjGoal = pool.find((cell) => {
+    if (!game._isMapGoal(cell.fx, cell.fy)) return false;
+    if (racer.robotType !== 'B') return true;
+    const g = game.mapGoals.find((gg) => gg.bx === cell.fx && gg.by === cell.fy);
+    return !g || !lineHasReachedB(g.groupId);
+  });
   if (adjGoal) return adjGoal;
 
   // Deadlock/congestion breaker, checked first so it actually gets to run
@@ -100,7 +120,8 @@ export function agent4ChooseMove(game, racer) {
   // Total goals == racer count always, so while this racer hasn't reached
   // one yet, some goal somewhere is free; if none of the KNOWN ones are,
   // exploring is guaranteed to eventually turn one up.
-  const freeKnownGoals = knownGoals.filter((g) => !isTaken(g));
+  const freeKnownGoals = knownGoals.filter((g) => !isTaken(g)
+    && (racer.robotType !== 'B' || !lineHasReachedB(g.groupId)));
 
   if (freeKnownGoals.length) {
     let target = null;
