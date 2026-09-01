@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=110';
+import { Game } from './game.js?v=111';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -36,10 +36,16 @@ toggleBtn.addEventListener('click', () => {
   toggleBtn.textContent = running ? '暂停' : '继续';
 });
 
+// Agent mode 4 repurposes the racer-count box into a task-count box (one
+// task = one goal line; the session's actual racer count is derived from
+// however many goals that many lines end up needing - see
+// Game#agent4TaskCount). Every other mode/strategy keeps the box meaning
+// "how many racers", as before.
 const syncRacerControl = () => {
-  racerLabelText.textContent = '参赛物体';
-  racerCountSelect.max = String(game.getMaxRacers());
-  racerCountSelect.value = String(game.racerCount);
+  const isAgent4 = game.gameType === 'map' && game.mapStrategy === 'agent4';
+  racerLabelText.textContent = isAgent4 ? '任务数量' : '参赛物体';
+  racerCountSelect.max = String(isAgent4 ? 4 : game.getMaxRacers());
+  racerCountSelect.value = String(isAgent4 ? game.agent4TaskCount : game.racerCount);
 };
 syncRacerControl();
 
@@ -71,7 +77,10 @@ speedSelect.addEventListener('change', () => {
 
 const applyRacerCount = () => {
   if (racerCountSelect.value === '') return;
-  const count = game.setRacerCount(Number(racerCountSelect.value));
+  const isAgent4 = game.gameType === 'map' && game.mapStrategy === 'agent4';
+  const count = isAgent4
+    ? game.setAgent4TaskCount(Number(racerCountSelect.value))
+    : game.setRacerCount(Number(racerCountSelect.value));
   racerCountSelect.value = String(count);
 };
 racerCountSelect.addEventListener('input', applyRacerCount);

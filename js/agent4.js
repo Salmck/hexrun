@@ -1,11 +1,27 @@
 // Agent mode 4 - kept as its own decoupled module (own state, own exported
-// hooks) so it can diverge from agent mode 3 later without touching agent3's
-// code or state. For now it is an exact behavioural copy of agent3: same
-// shared-vision swarm brain (blind exploration, A*-to-goal, BFS chain-yield)
-// against the same several-separate-goal-lines-with-cargo map layout. See
-// js/agent3.js for the full rationale behind each piece below - this file
-// mirrors it line for line under its own agent4* names/state so the two
-// modes never share or clobber each other's memory.
+// hooks) so it can diverge from agent mode 3 without touching agent3's code
+// or state. The movement AI (blind exploration, A*-to-goal, BFS chain-yield)
+// is currently an exact behavioural copy of agent3's - see js/agent3.js for
+// the full rationale behind that part - deliberately unchanged: every racer
+// still paths toward whatever known, free goal is nearest, with no
+// distinction between robot types.
+//
+// What IS different from agent3 is the map itself and, cosmetically, the
+// racers on it:
+// - Driven by a task COUNT (1-4, one task = one goal line), not a target
+//   racer-count total to partition - see agent4GenerateMap. The session's
+//   actual racer count is whatever those lines add up to, read back by the
+//   caller once the map is built.
+// - Every goal line is odd-length (3 or 5 goals), and its cargo is kept
+//   centered on the line - see pickLineSizes and pickCenteredCargoIndices.
+// - Racers are cosmetically split into two "robot types", A and B, told
+//   apart only by their 8 triangular faces (white vs black - see game.js's
+//   _setTriangleColor); the number of type-B racers always equals the
+//   number of goal lines (one B's worth per task). This is a population
+//   count only, assigned once at setup - which specific racer lands on B is
+//   an otherwise-meaningless random pick, and it has no effect on routing:
+//   type A and B chase goals identically, exactly like agent3. Any real
+//   behavioral difference between the two types is a separate, later step.
 
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 
@@ -327,27 +343,38 @@ function agent4ForceYield(game, parked) {
 // Map generation: several separate goal lines + one-sided cargo.
 // --------------------------------------------------------------------------
 
-// Random group sizes in [2,5] summing exactly to `total`, never leaving an
-// invalid size-1 remainder. A pure random pick can walk itself into a corner
-// where only 1 is left; when that happens the last pick is nudged so the
-// remainder becomes 2 (or the leftover 1 is folded into the previous group)
-// instead of ever emitting a line shorter than 2.
-function partitionGoalCounts(total) {
-  if (total <= 1) return total === 1 ? [1] : [];
-  const sizes = [];
-  let remaining = total;
-  while (remaining >= 2) {
-    const maxS = Math.min(5, remaining);
-    let s = 2 + Math.floor(Math.random() * (maxS - 1));
-    if (remaining - s === 1) s = s > 2 ? s - 1 : Math.min(3, maxS);
-    sizes.push(s);
-    remaining -= s;
+// One size (3 or 5, picked independently at random) per task/goal line -
+// unlike agent3's partitionGoalCounts, agent4 is driven by a task COUNT
+// (see agent4GenerateMap), not a target racer-count total to partition, and
+// every line must come out odd-length so it always has an exact center cell
+// for pickCenteredCargoIndices below to anchor on.
+function pickLineSizes(taskCount) {
+  return Array.from({ length: taskCount }, () => (Math.random() < 0.5 ? 3 : 5));
+}
+
+// Chooses which `cargoCount` of a (always odd-length) line's `n` cells sit
+// beside cargo, kept centered on the line: a single crate goes exactly in
+// the middle cell; two or more put the farthest-apart pair symmetrically
+// around the center (as far out as the line allows) and scatter any
+// remaining crates randomly in the span between them.
+function pickCenteredCargoIndices(n, cargoCount) {
+  const center = (n - 1) / 2;
+  if (cargoCount <= 0) return new Set();
+  if (cargoCount === 1) return new Set([center]);
+  const spread = Math.floor(n / 2);
+  const idxs = new Set([center - spread, center + spread]);
+  if (cargoCount > 2) {
+    const interior = [];
+    for (let i = center - spread + 1; i < center + spread; i++) {
+      if (!idxs.has(i)) interior.push(i);
+    }
+    for (let i = interior.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [interior[i], interior[j]] = [interior[j], interior[i]];
+    }
+    for (const idx of interior.slice(0, cargoCount - 2)) idxs.add(idx);
   }
-  if (remaining === 1) {
-    if (sizes.length && sizes[sizes.length - 1] < 5) sizes[sizes.length - 1] += 1;
-    else sizes.push(1);
-  }
-  return sizes;
+  return idxs;
 }
 
 // A working map big enough that `lineCount` goal lines can actually find
@@ -432,23 +459,14 @@ function placeOneLine(width, height, n, existingLines) {
   return null;
 }
 
-function shuffleIndices(n) {
-  const arr = Array.from({ length: n }, (_, i) => i);
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
 // Carves one line's cargo side and open side into `grid` (mutated in place,
 // true = open). The whole cargo-side edge (one cell out from every goal in
 // the line) is forced closed - some of those cells become actual cargo
-// crates (one type, at most floor(n/2) of them, at random positions along
-// the line), the rest become plain forced wall - so the barrier reads as
-// solid with crates set into it, never a stray open gap next to a crate.
-// Each crate's outward-facing cell (one further out) is forced closed too,
-// so no crate ever backs onto open ground either.
+// crates (one type, at most floor(n/2) of them, kept centered on the line
+// via pickCenteredCargoIndices), the rest become plain forced wall - so the
+// barrier reads as solid with crates set into it, never a stray open gap
+// next to a crate. Each crate's outward-facing cell (one further out) is
+// forced closed too, so no crate ever backs onto open ground either.
 //
 // The opposite (entrance) side is forced OPEN for a yellow line, exactly as
 // before - clear approach ground. For a BLUE line it's forced CLOSED
@@ -473,7 +491,7 @@ function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformLi
 
   const maxCargo = Math.floor(n / 2);
   const cargoCount = maxCargo > 0 ? 1 + Math.floor(Math.random() * maxCargo) : 0;
-  const cargoIdxs = new Set(shuffleIndices(n).slice(0, cargoCount));
+  const cargoIdxs = pickCenteredCargoIndices(n, cargoCount);
   const kind = Math.random() < 0.5 ? 0 : 1;
   line.kind = kind;
 
@@ -564,16 +582,16 @@ function computeObstacleComponents(grid, width, height, cargoSet, platformSet) {
 }
 
 // Builds a full agent4 map: a connected base obstacle field (reusing the
-// same generator every other strategy uses) with `racerCount` goals carved
-// in as several separate straight lines (2-5 goals each), each lined with
-// one-type cargo on a random side and left fully open on the other, all
-// lines kept >=MIN_LINE_GAP apart. Retries from a fresh random layout
-// (re-rolling the line-size partition too) until every constraint holds,
-// including - critically - that the WHOLE map stays one connected region,
-// so no racer can ever be sealed off from every goal.
-export function agent4GenerateMap(baseSize, racerCount, rng = Math.random) {
+// same generator every other strategy uses) with `taskCount` separate goal
+// lines carved in, one per task, each an odd length (3 or 5 goals) with its
+// cargo centered on the line, lined with one-type cargo on a random side and
+// left fully open on the other, all lines kept >=MIN_LINE_GAP apart. Retries
+// from a fresh random layout (re-rolling the line sizes too) until every
+// constraint holds, including - critically - that the WHOLE map stays one
+// connected region, so no racer can ever be sealed off from every goal.
+export function agent4GenerateMap(baseSize, taskCount, rng = Math.random) {
   for (let attempt = 0; attempt < 60; attempt++) {
-    const sizes = partitionGoalCounts(Math.max(0, Math.round(racerCount)));
+    const sizes = pickLineSizes(Math.max(1, Math.round(taskCount)));
     if (!sizes.length) continue;
     const size = neededMapSize(sizes.length, baseSize);
     const grid = buildTiledGrid(size, baseSize, rng);
