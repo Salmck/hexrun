@@ -18,10 +18,23 @@
 //   always equals the number of goal lines (one B's worth per task) - a
 //   population count only, assigned once at setup, so which specific racer
 //   lands on B is an otherwise-meaningless random pick.
-// - Type A chases goals exactly like agent3, no restriction at all. Type B
-//   does the same EXCEPT it won't target a goal on a line that already has
-//   a type-B racer settled on it - see the lineHasReachedB check in
-//   agent4ChooseMove for why this is a soft preference, not a reservation.
+// - Type B won't target a goal on a line that already has a type-B racer
+//   settled on it - see the lineHasReachedB check in agent4ChooseMove for
+//   why this is a soft preference (no claim/commit bookkeeping), not a hard
+//   reservation: nothing stops two B's converging on the same still-open
+//   line at once.
+// - Type A chases goals exactly like agent3, EXCEPT it will not take a
+//   line's last remaining empty cell while that line still has zero type-B
+//   racers settled on it - that one cell is left for a B to claim instead.
+//   This is enforced at the movement level too (game._agent4ReservedForB,
+//   gating game._mapCellAvailable) so a type-A racer can never end up there
+//   by exploration/scatter wandering either, not just by deliberate
+//   targeting. Because type-B convergence above is only a soft preference,
+//   it is possible (if rare) for every remaining un-reached B to already be
+//   piled onto other lines while some other line sits at "one cell left,
+//   still zero B" - in that specific case this one cell would stay
+//   permanently unfillable. Accepted for now as a known edge case rather
+//   than adding reservation/claim machinery to close it.
 
 import { findPath, generateObstacleGrid } from './maze.js?v=25';
 
@@ -120,8 +133,14 @@ export function agent4ChooseMove(game, racer) {
   // Total goals == racer count always, so while this racer hasn't reached
   // one yet, some goal somewhere is free; if none of the KNOWN ones are,
   // exploring is guaranteed to eventually turn one up.
+  // Mirrors game._mapCellAvailable's own reservation gate below (which
+  // physically blocks type A from ever stepping onto such a cell) - without
+  // this, a type-A racer could still pick a reserved cell as `target`, A*
+  // would happily route it there, and it would then stall forever one step
+  // short since the final move keeps getting refused.
   const freeKnownGoals = knownGoals.filter((g) => !isTaken(g)
-    && (racer.robotType !== 'B' || !lineHasReachedB(g.groupId)));
+    && (racer.robotType !== 'B' || !lineHasReachedB(g.groupId))
+    && (racer.robotType === 'B' || !game._agent4ReservedForB(g.bx, g.by)));
 
   if (freeKnownGoals.length) {
     let target = null;

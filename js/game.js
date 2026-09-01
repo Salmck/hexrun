@@ -5,7 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=25';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=9';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap } from './agent4.js?v=10';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -1501,6 +1501,7 @@ export class Game {
   _mapCellAvailable(x, y, racer) {
     if (!this.blockGrid.blockOpen(x, y)) return false;
     if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') {
+      if (this.mapStrategy === 'agent4' && racer.robotType !== 'B' && this._agent4ReservedForB(x, y)) return false;
       // Any cell another racer stands on is taken - including one that has
       // stopped on a goal, which is a permanent obstacle to everyone else.
       return !this.mapRacers.some((other) => other !== racer && other.bx === x && other.by === y);
@@ -1514,6 +1515,31 @@ export class Game {
       other.status !== 'reached' &&
       other.bx === x && other.by === y
     );
+  }
+
+  // True when (x,y) is a goal cell whose line has exactly one empty slot
+  // left and no type-B racer has settled on that line yet - in which case
+  // that one remaining cell is reserved for a type-B racer, and type A must
+  // not be allowed to take it (checked live off current racer state each
+  // call, not a persisted claim, so there is nothing to go stale). Once a
+  // second-to-last cell fills or a B does arrive, this stops applying on
+  // its own - no bookkeeping to clear.
+  _agent4ReservedForB(x, y) {
+    const goal = this.mapGoals.find((g) => g.bx === x && g.by === y);
+    if (!goal) return false;
+    const lineGoals = this.mapGoals.filter((g) => g.groupId === goal.groupId);
+    let reachedCount = 0;
+    let reachedB = 0;
+    let thisCellReached = false;
+    for (const r of this.mapRacers) {
+      if (r.status !== 'reached') continue;
+      if (!lineGoals.some((g) => g.bx === r.bx && g.by === r.by)) continue;
+      reachedCount++;
+      if (r.robotType === 'B') reachedB++;
+      if (r.bx === x && r.by === y) thisCellReached = true;
+    }
+    if (thisCellReached) return false; // already settled - moot for availability
+    return reachedB === 0 && reachedCount === lineGoals.length - 1;
   }
 
   // Tries to make `next` walkable for `racer` right now by asking whichever
