@@ -172,8 +172,10 @@ export class Game {
   // JSON recipe (map size, task count, and the EXACT seed this run used -
   // agent4LastSeed, not agent4Seed, so a "-1 = random" run is still saved
   // reproducibly) that loadAgent4MapConfig can turn back into the identical
-  // map/spawn/routing, and a PNG snapshot of the current layout for a quick
-  // visual reference. Only meaningful in agent4 mode.
+  // map/spawn/routing, and a PNG snapshot of the map's STARTING layout
+  // (walls/goals/cargo plus every racer's initial position and type, from
+  // agent4InitialSnapshot) for a quick visual reference - not wherever
+  // everyone has moved to since. Only meaningful in agent4 mode.
   saveAgent4Map() {
     if (this.mapStrategy !== 'agent4') return;
     const stamp = `${this.agent4MapSize}x${this.agent4MapSize}-t${this.agent4TaskCount}-seed${this.agent4LastSeed}`;
@@ -226,10 +228,13 @@ export class Game {
 
   // A self-contained top-down schematic of the current agent-4 map, drawn
   // straight from game-state data (blockGrid/mapGoals/mapCargo/mapPlatforms/
-  // mapRacers) onto an offscreen canvas - not a screenshot of the live 3D or
-  // 2D view, so it works regardless of which one is on screen and always
-  // reflects the map exactly (walls, every goal line in its own color,
-  // cargo, platforms, and every racer's current position/type/color).
+  // agent4InitialSnapshot) onto an offscreen canvas - not a screenshot of
+  // the live 3D or 2D view, so it works regardless of which one is on
+  // screen and always reflects the map exactly (walls, every goal line in
+  // its own color, cargo, platforms) plus every racer's STARTING
+  // position/type - agent4InitialSnapshot, not the live mapRacers, so the
+  // saved image always shows the map as it began, not wherever everyone
+  // has since wandered or settled to.
   _agent4RenderMapCanvas() {
     if (!this.blockGrid || !this.mapGoals) return null;
     const { blocksX, blocksY, blockOpen } = this.blockGrid;
@@ -274,10 +279,11 @@ export class Game {
       ctx.fillRect(ox + p.bx * cell, oy + p.by * cell, cell, cell);
     }
 
-    for (const r of this.mapRacers || []) {
+    const snapshot = this.agent4InitialSnapshot || [];
+    for (const r of snapshot) {
       const cx = ox + r.bx * cell + cell / 2;
       const cy = oy + r.by * cell + cell / 2;
-      const hue = (r.id / this.mapRacers.length) % 1;
+      const hue = (r.id / snapshot.length) % 1;
       ctx.fillStyle = `hsl(${Math.round(hue * 360)}, 65%, 55%)`;
       ctx.beginPath();
       ctx.arc(cx, cy, cell * 0.4, 0, Math.PI * 2);
@@ -1265,6 +1271,19 @@ export class Game {
     }
     this._camTarget.set(0, this.apothem, 0);
     this.setSpeed(this.speedName || 'normal');
+
+    if (isAgent4) {
+      // Snapshotted once here, right after every racer's starting cell and
+      // type are set - saveAgent4Map's image reads this instead of the live
+      // racer positions, so it always shows the map's ORIGINAL layout, not
+      // wherever everyone has since wandered/settled to.
+      this.agent4InitialSnapshot = this.mapRacers.map((r) => ({ bx: r.bx, by: r.by, id: r.id, robotType: r.robotType }));
+      // A freshly (re)generated agent-4 map starts paused - task count, map
+      // size, and seed are all easy to change right up until the moment
+      // someone's actually ready to watch it run, and a auto-running
+      // simulation makes the map/spawn layout harder to inspect first.
+      this.running = false;
+    }
   }
 
   _teardownMapMode() {

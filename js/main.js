@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=115';
+import { Game } from './game.js?v=116';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -43,6 +43,15 @@ toggleBtn.addEventListener('click', () => {
   toggleBtn.textContent = running ? '暂停' : '继续';
 });
 
+// Agent mode 4 starts every freshly (re)generated map paused (see
+// Game#_setupMapMode) - task count/map size/seed are easy to keep tweaking
+// right up until someone's actually ready to watch it run. Anything that
+// can trigger a reset needs to re-sync this button afterward, since
+// game.running may have just changed out from under it.
+const syncToggleButton = () => {
+  toggleBtn.textContent = game.running ? '暂停' : '继续';
+};
+
 // Agent mode 4 repurposes the racer-count box into a task-count box (one
 // task = one goal line; the session's actual racer count is derived from
 // however many goals that many lines end up needing - see
@@ -70,6 +79,7 @@ gametypeBtn.addEventListener('click', () => {
   gametypeBtn.textContent = type === 'track' ? '赛道模式' : '地图模式';
   mapStrategyBtn.hidden = type !== 'map';
   syncRacerControl();
+  syncToggleButton();
 });
 
 const MAP_STRATEGY_LABEL = { path: 'A* 寻路', explore: '自主探索', agent: '智能体模式', agent2: '智能体模式2', agent3: '智能体模式3', agent4: '智能体模式4' };
@@ -77,14 +87,18 @@ mapStrategyBtn.addEventListener('click', () => {
   const strategy = game.toggleMapStrategy();
   mapStrategyBtn.textContent = MAP_STRATEGY_LABEL[strategy];
   syncRacerControl();
+  syncToggleButton();
 });
 
 resetBtn.addEventListener('click', () => {
   game.reset();
-  if (!game.running) {
-    game.toggle();
-    toggleBtn.textContent = '暂停';
-  }
+  // Every other mode always resumes right after a manual reset; agent mode
+  // 4 instead respects whatever game.reset() just decided (always paused -
+  // see Game#_setupMapMode), so pressing 重置 there doesn't fight the
+  // "review the new map before starting it" behavior those settings exist for.
+  const isAgent4 = game.gameType === 'map' && game.mapStrategy === 'agent4';
+  if (!isAgent4 && !game.running) game.toggle();
+  syncToggleButton();
 });
 
 speedSelect.addEventListener('change', () => {
@@ -98,6 +112,7 @@ const applyRacerCount = () => {
     ? game.setAgent4TaskCount(Number(racerCountSelect.value))
     : game.setRacerCount(Number(racerCountSelect.value));
   racerCountSelect.value = String(count);
+  syncToggleButton();
 };
 racerCountSelect.addEventListener('input', applyRacerCount);
 racerCountSelect.addEventListener('change', applyRacerCount);
@@ -106,6 +121,7 @@ const applyAgent4MapSize = () => {
   if (agent4MapSizeInput.value === '') return;
   const size = game.setAgent4MapSize(Number(agent4MapSizeInput.value));
   agent4MapSizeInput.value = String(size);
+  syncToggleButton();
 };
 agent4MapSizeInput.addEventListener('input', applyAgent4MapSize);
 agent4MapSizeInput.addEventListener('change', applyAgent4MapSize);
@@ -114,6 +130,7 @@ const applyAgent4Seed = () => {
   if (agent4SeedInput.value === '') return;
   const seed = game.setAgent4Seed(Number(agent4SeedInput.value));
   agent4SeedInput.value = String(seed);
+  syncToggleButton();
 };
 agent4SeedInput.addEventListener('input', applyAgent4Seed);
 agent4SeedInput.addEventListener('change', applyAgent4Seed);
@@ -137,10 +154,7 @@ openMapFile.addEventListener('change', async () => {
     mapStrategyBtn.hidden = game.gameType !== 'map';
     mapStrategyBtn.textContent = MAP_STRATEGY_LABEL[game.mapStrategy];
     syncRacerControl();
-    if (!game.running) {
-      game.toggle();
-      toggleBtn.textContent = '暂停';
-    }
+    syncToggleButton(); // loadAgent4MapConfig leaves the game paused - see Game#_setupMapMode
   } catch (err) {
     console.error('Failed to load agent-4 map file:', err);
     window.alert('地图文件读取失败：' + err.message);

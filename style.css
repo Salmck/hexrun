@@ -86,13 +86,16 @@ html, body {
   left: 50%;
   transform: translateX(-50%);
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 10px;
   align-items: center;
+  max-width: min(92vw, 900px);
   background: rgba(20, 24, 31, 0.6);
   border: 1px solid rgba(255, 255, 255, 0.08);
   backdrop-filter: blur(6px);
   padding: 8px 12px;
-  border-radius: 999px;
+  border-radius: 20px;
 }
 
 #controls button {
@@ -106,6 +109,8 @@ html, body {
   border-radius: 999px;
   cursor: pointer;
   transition: filter 0.15s ease;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 #controls button:hover {
@@ -125,17 +130,23 @@ html, body {
 }
 
 #speed-label,
-#racer-label {
+#racer-label,
+#agent4-mapsize-label,
+#agent4-seed-label {
   font-size: 12px;
   color: #d8d2c8;
   display: flex;
   align-items: center;
   gap: 6px;
   padding-left: 4px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 #speed-label select,
-#racer-label input {
+#racer-label input,
+#agent4-mapsize-label input,
+#agent4-seed-label input {
   background: rgba(0, 0, 0, 0.3);
   color: #ece6df;
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -144,8 +155,14 @@ html, body {
   font-size: 12px;
 }
 
-#racer-label input {
-  width: 48px;
+#racer-label input,
+#agent4-mapsize-label input {
+  width: 44px;
+  text-align: center;
+}
+
+#agent4-seed-label input {
+  width: 68px;
   text-align: center;
 }
 
