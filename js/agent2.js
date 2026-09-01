@@ -14,7 +14,7 @@
 // game._applyMapMove, plus game.mapRacers / mapGoals / mapGoalMarkers /
 // blockGrid and the shared sets game.agent2Visited / agent2Sensed.
 
-import { findPath } from './maze.js?v=25';
+import { findPath } from './maze.js?v=26';
 
 const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 

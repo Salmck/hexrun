@@ -1,11 +1,11 @@
 import * as THREE from 'three';
 import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js?v=1';
-import { findPath, generateObstacleGrid } from './maze.js?v=25';
+import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng } from './agent4.js?v=12';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng } from './agent4.js?v=13';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);

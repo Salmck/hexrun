@@ -140,7 +140,13 @@ export function bfsFarthest(isOpen, gridW, start) {
 // a perfect maze. Random wall segments create structure, then only the
 // largest connected open component is kept so every selected start can reach
 // the shared goal.
-export function generateObstacleGrid(width, height, rng = Math.random, obstacleProbability = 0.32) {
+// minComponents/minBlockedRatio gate how rich/maze-like the field has to
+// be before it's accepted - the defaults are tuned for the game's normal
+// map sizes. A small custom map (agent4's configurable size) can never
+// reach 14 separate obstacle components at all, so callers generating a
+// small canvas pass a proportionally scaled-down minComponents instead of
+// relying on the default.
+export function generateObstacleGrid(width, height, rng = Math.random, obstacleProbability = 0.32, minComponents = 14, minBlockedRatio = 0.16) {
   const key = (x, y) => y * width + x;
   for (let attempt = 0; attempt < 300; attempt++) {
     // Phase 1: the map-sized 2D array. true = open, false = obstacle point.
@@ -198,7 +204,7 @@ export function generateObstacleGrid(width, height, rng = Math.random, obstacleP
       }
     }
     const blockedCount = width * height - openCells.length;
-    if (obstacleComponents.length < 14 || blockedCount < width * height * 0.16) continue;
+    if (obstacleComponents.length < minComponents || blockedCount < width * height * minBlockedRatio) continue;
 
     const blockOpen = (x, y) => x >= 0 && y >= 0 && x < width && y < height && grid[y][x];
     return { blocksX: width, blocksY: height, grid, blockOpen, openCells, obstacleComponents };

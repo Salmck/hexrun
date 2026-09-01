@@ -36,7 +36,7 @@
 //   permanently unfillable. Accepted for now as a known edge case rather
 //   than adding reservation/claim machinery to close it.
 
-import { findPath, generateObstacleGrid } from './maze.js?v=25';
+import { findPath, generateObstacleGrid } from './maze.js?v=26';
 
 const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
@@ -51,15 +51,18 @@ const MIN_LINE_GAP_AT_REFERENCE_SIZE = 10;
 const REFERENCE_MAP_SIZE = 21;
 const MAX_MAP_SIZE = 61;
 
-// generateObstacleGrid (maze.js) needs enough total cells to ever reach its
-// own "at least 14 separate obstacle components, >=16% blocked" thresholds
-// at all - empirically, 9x9 and smaller NEVER succeed (not even a chance of
-// it: too few cells to form 14 components from), while 12x12 and up succeed
-// essentially every time. So however small a map size is requested, the
-// actual generation floor never goes below this - a hard structural limit
-// of the shared generator, not something agent4 can meaningfully work
-// around.
-const MIN_GENERATABLE_SIZE = 12;
+// generateObstacleGrid's default "at least 14 separate obstacle components"
+// requirement is tuned for the game's normal ~21-cell maps - a small custom
+// agent4 map can never reach 14 components at all (there just aren't enough
+// cells), so every call here scales that requirement down to the actual
+// generated size instead of relying on the default. Verified empirically
+// down to a 6x6 grid (still succeeds reliably scaled this way) - the real
+// lower bound on map size ends up being how big a single goal line needs
+// (see neededMapSize), not this.
+const REFERENCE_MIN_COMPONENTS = 14;
+function scaledMinComponents(size) {
+  return Math.max(1, Math.round((REFERENCE_MIN_COMPONENTS * size * size) / (REFERENCE_MAP_SIZE * REFERENCE_MAP_SIZE)));
+}
 
 // A tiny deterministic PRNG (mulberry32): given the same integer seed, this
 // produces the exact same sequence of [0,1) floats every time, in every
@@ -462,12 +465,11 @@ function computeLineGap(mapSize) {
 
 // A working map big enough that `lineCount` goal lines can actually find
 // mutually-`gap`-apart placements, that a single max-length (5-cell) line
-// can be placed at all past its margin, and that generateObstacleGrid can
-// reliably build it in the first place (MIN_GENERATABLE_SIZE). A handful of
-// lines fit `baseSize` easily; many lines need a visibly larger map, scaled
-// by how many roughly-gap-apart slots have to fit on each axis.
+// can be placed at all past its margin. A handful of lines fit `baseSize`
+// easily; many lines need a visibly larger map, scaled by how many
+// roughly-gap-apart slots have to fit on each axis.
 function neededMapSize(lineCount, baseSize, gap) {
-  const minForOneLine = Math.max(MIN_GENERATABLE_SIZE, 2 * 2 + 5); // margin (2 each side) + longest line (5)
+  const minForOneLine = 2 * 2 + 5; // margin (2 each side) + longest line (5)
   if (lineCount <= 1) return Math.max(baseSize, minForOneLine);
   const perAxis = Math.ceil(Math.sqrt(lineCount));
   return Math.min(MAX_MAP_SIZE, Math.max(baseSize, minForOneLine, perAxis * gap + 8));
@@ -491,10 +493,12 @@ function neededMapSize(lineCount, baseSize, gap) {
 // generateObstacleGrid only guarantees the full tile it was asked for is
 // one connected region.
 function buildTiledGrid(canvasSize, baseSize, rng) {
-  if (canvasSize <= baseSize) return generateObstacleGrid(canvasSize, canvasSize, rng).grid;
+  if (canvasSize <= baseSize) {
+    return generateObstacleGrid(canvasSize, canvasSize, rng, 0.32, scaledMinComponents(canvasSize)).grid;
+  }
   const tilesPerSide = Math.ceil(canvasSize / baseSize);
   const tiles = Array.from({ length: tilesPerSide }, () =>
-    Array.from({ length: tilesPerSide }, () => generateObstacleGrid(baseSize, baseSize, rng).grid)
+    Array.from({ length: tilesPerSide }, () => generateObstacleGrid(baseSize, baseSize, rng, 0.32, scaledMinComponents(baseSize)).grid)
   );
   const grid = Array.from({ length: canvasSize }, (_, y) =>
     Array.from({ length: canvasSize }, (_, x) => {
@@ -693,19 +697,13 @@ function computeObstacleComponents(grid, width, height, cargoSet, platformSet) {
 // spawn position, robot-type assignment, and movement tie-break during play
 // - fully reproducible from just (seed, baseSize, taskCount).
 export function agent4GenerateMap(baseSize, taskCount, rng = Math.random) {
-  // `base` keeps the user's raw preference for gap scaling (so an 8 still
-  // means a proportionally small gap between lines); `tileSize` is the
-  // separate, always->=MIN_GENERATABLE_SIZE granularity buildTiledGrid
-  // actually generates each patch at, since that's a hard requirement of
-  // the shared generator regardless of what the user asked for.
   const base = Math.max(4, Math.round(baseSize) || 4);
-  const tileSize = Math.max(base, MIN_GENERATABLE_SIZE);
   const gap = computeLineGap(base);
   for (let attempt = 0; attempt < 60; attempt++) {
     const sizes = pickLineSizes(Math.max(1, Math.round(taskCount)), rng);
     if (!sizes.length) continue;
     const size = neededMapSize(sizes.length, base, gap);
-    const grid = buildTiledGrid(size, tileSize, rng);
+    const grid = buildTiledGrid(size, base, rng);
 
     const lines = [];
     let ok = true;

@@ -18,7 +18,7 @@
 // These are free functions taking the Game instance as `game`, exactly like
 // agent2.js; game.js keeps only the thin hooks that call into here.
 
-import { findPath, generateObstacleGrid } from './maze.js?v=25';
+import { findPath, generateObstacleGrid } from './maze.js?v=26';
 
 const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
