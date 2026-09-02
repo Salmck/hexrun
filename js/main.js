@@ -119,13 +119,18 @@ const applyRacerCount = () => {
 racerCountSelect.addEventListener('input', applyRacerCount);
 racerCountSelect.addEventListener('change', applyRacerCount);
 
+// Map size and seed only take effect on 'change' (blur or Enter), not
+// every keystroke ('input') - unlike the small 1-4 task-count box, these
+// can be several digits long (a seed especially), and regenerating the
+// whole map after every single character typed would mean whatever's on
+// screen when you stop to look almost never matches the value actually
+// sitting in the box.
 const applyAgent4MapSize = () => {
   if (agent4MapSizeInput.value === '') return;
   const size = game.setAgent4MapSize(Number(agent4MapSizeInput.value));
   agent4MapSizeInput.value = String(size);
   syncToggleButton();
 };
-agent4MapSizeInput.addEventListener('input', applyAgent4MapSize);
 agent4MapSizeInput.addEventListener('change', applyAgent4MapSize);
 
 const applyAgent4Seed = () => {
@@ -134,7 +139,6 @@ const applyAgent4Seed = () => {
   agent4SeedInput.value = String(seed);
   syncToggleButton();
 };
-agent4SeedInput.addEventListener('input', applyAgent4Seed);
 agent4SeedInput.addEventListener('change', applyAgent4Seed);
 
 saveMapBtn.addEventListener('click', () => {
