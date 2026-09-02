@@ -86,9 +86,8 @@ html, body {
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   align-items: center;
   max-width: min(92vw, 900px);
   background: rgba(20, 24, 31, 0.6);
@@ -96,6 +95,14 @@ html, body {
   backdrop-filter: blur(6px);
   padding: 8px 12px;
   border-radius: 20px;
+}
+
+.controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  align-items: center;
 }
 
 #controls button {
