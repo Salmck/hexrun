@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>翻滚多面体 · 障碍模拟</title>
-  <link rel="stylesheet" href="style.css?v=3" />
+  <link rel="stylesheet" href="style.css?v=5" />
   <script type="importmap">
     {
       "imports": {
@@ -27,40 +27,41 @@
     </header>
 
     <div id="controls">
-      <div class="controls-row">
-        <button id="btn-toggle" type="button">暂停</button>
-        <button id="btn-gametype" type="button">赛道模式</button>
-        <button id="btn-map-strategy" type="button" hidden>A* 寻路</button>
-        <button id="btn-reset" type="button">重置</button>
-        <button id="btn-save-map" type="button" hidden>保存地图</button>
-        <button id="btn-open-map" type="button" hidden>打开地图</button>
-        <input id="open-map-file" type="file" accept="application/json" hidden style="display:none" />
-      </div>
-      <div class="controls-row">
-        <label id="racer-label">
-          <span id="racer-label-text">参赛物体</span>
-          <input id="racer-count" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" />
-        </label>
-        <label id="agent4-mapsize-label" hidden>
-          地图边长
-          <input id="agent4-mapsize" type="number" min="4" max="40" step="1" value="8" inputmode="numeric" />
-        </label>
-        <label id="agent4-seed-label" hidden>
-          随机因子
-          <input id="agent4-seed" type="number" step="1" value="-1" inputmode="numeric" title="-1 表示每次随机" />
-        </label>
-        <label id="speed-label">
-          速度
-          <select id="speed">
-            <option value="slow">慢</option>
-            <option value="normal" selected>正常</option>
-            <option value="fast">快</option>
-          </select>
-        </label>
-      </div>
+      <button id="btn-toggle" type="button">暂停</button>
+      <button id="btn-gametype" type="button">赛道模式</button>
+      <button id="btn-map-strategy" type="button" hidden>A* 寻路</button>
+      <button id="btn-reset" type="button">重置</button>
+      <button id="btn-save-map" type="button" hidden>保存地图</button>
+      <button id="btn-open-map" type="button" hidden>打开地图</button>
+      <input id="open-map-file" type="file" accept="application/json" hidden style="display:none" />
+      <!-- Only unhidden in agent mode 4 (see main.js syncRacerControl), where
+           there are enough controls to need a deliberate second row - every
+           other mode/strategy keeps flowing everything into one row exactly
+           as before. -->
+      <div id="controls-break" hidden></div>
+      <label id="racer-label">
+        <span id="racer-label-text">参赛物体</span>
+        <input id="racer-count" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" />
+      </label>
+      <label id="agent4-mapsize-label" hidden>
+        地图边长
+        <input id="agent4-mapsize" type="number" min="4" max="40" step="1" value="8" inputmode="numeric" />
+      </label>
+      <label id="agent4-seed-label" hidden>
+        随机因子
+        <input id="agent4-seed" type="number" step="1" value="-1" inputmode="numeric" title="-1 表示每次随机" />
+      </label>
+      <label id="speed-label">
+        速度
+        <select id="speed">
+          <option value="slow">慢</option>
+          <option value="normal" selected>正常</option>
+          <option value="fast">快</option>
+        </select>
+      </label>
     </div>
   </div>
 
-  <script type="module" src="js/main.js?v=116"></script>
+  <script type="module" src="js/main.js?v=117"></script>
 </body>
 </html>

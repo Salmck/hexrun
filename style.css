@@ -2,6 +2,16 @@
   box-sizing: border-box;
 }
 
+/* The browser's default [hidden] { display: none } only wins on
+   specificity ties - an ID-selector rule elsewhere that sets its own
+   `display` (several control-bar labels do, to lay themselves out as a
+   flex row) beats it and renders the element anyway despite `hidden` being
+   set. This unconditionally wins instead, so toggling the `hidden`
+   property/attribute from JS always actually hides the element. */
+[hidden] {
+  display: none !important;
+}
+
 html, body {
   margin: 0;
   padding: 0;
@@ -86,8 +96,10 @@ html, body {
   left: 50%;
   transform: translateX(-50%);
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+  row-gap: 8px;
+  column-gap: 10px;
   align-items: center;
   max-width: min(92vw, 900px);
   background: rgba(20, 24, 31, 0.6);
@@ -97,12 +109,12 @@ html, body {
   border-radius: 20px;
 }
 
-.controls-row {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 10px;
-  align-items: center;
+/* Forces a line break right after it, but only when unhidden (agent mode 4
+   - see main.js syncRacerControl) - every other mode/strategy leaves this
+   hidden (0 width, no break) and just flows as one row like before. */
+#controls-break {
+  flex-basis: 100%;
+  height: 0;
 }
 
 #controls button {

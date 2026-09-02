@@ -19,6 +19,7 @@ const agent4SeedInput = document.getElementById('agent4-seed');
 const saveMapBtn = document.getElementById('btn-save-map');
 const openMapBtn = document.getElementById('btn-open-map');
 const openMapFile = document.getElementById('open-map-file');
+const controlsBreak = document.getElementById('controls-break');
 
 const game = new Game(canvas, {
   onStats: (stats) => {
@@ -67,6 +68,7 @@ const syncRacerControl = () => {
   agent4SeedLabel.hidden = !isAgent4;
   saveMapBtn.hidden = !isAgent4;
   openMapBtn.hidden = !isAgent4;
+  controlsBreak.hidden = !isAgent4;
   if (isAgent4) {
     agent4MapSizeInput.value = String(game.agent4MapSize);
     agent4SeedInput.value = String(game.agent4Seed);
