@@ -35,6 +35,13 @@
 //   still zero B" - in that specific case this one cell would stay
 //   permanently unfillable. Accepted for now as a known edge case rather
 //   than adding reservation/claim machinery to close it.
+// - Once a (yellow) line fills up completely, its B physically rolls into
+//   the line's CENTER cell if it isn't there already - see
+//   game._agent4CheckLineForRecenter/_updateAgent4Recenter. This is a
+//   post-completion repositioning step, not part of routing at all - it
+//   only ever runs once every cell in that line is already settled, so it
+//   can't interact with or deadlock against anything still actively
+//   pathfinding.
 
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 
@@ -131,7 +138,14 @@ export function agent4ChooseMove(game, racer) {
   // there's no claim/commit bookkeeping needed, and the existing "no known
   // free goal -> keep exploring" fallback below already covers a B that
   // temporarily has nowhere it's willing to go.
-  const lineHasReachedB = (groupId) => game.mapRacers.some((o) => {
+  //
+  // agent4LinesRecentering also counts as "has a B" here: while a completed
+  // yellow line's B is mid-recenter (see game._agent4CheckLineForRecenter),
+  // it briefly isn't standing on any goal cell of its own line at all - a
+  // DIFFERENT B evaluating this same tick would otherwise see the line as
+  // B-less and free to target, right as the center cell is briefly vacant
+  // for the recenter to use.
+  const lineHasReachedB = (groupId) => game.agent4LinesRecentering?.has(groupId) || game.mapRacers.some((o) => {
     if (o.robotType !== 'B' || o.status !== 'reached') return false;
     const og = game.mapGoals.find((gg) => gg.bx === o.bx && gg.by === o.by);
     return og && og.groupId === groupId;
@@ -728,8 +742,17 @@ export function agent4GenerateMap(baseSize, taskCount, rng = Math.random) {
     const obstacleComponents = computeObstacleComponents(grid, size, size, cargoSet, platformSet);
     const blockOpen = (x, y) => inBounds(x, y, size, size) && grid[y][x];
 
+    // posIndex/isCenter/kind let game.js's post-completion recenter step
+    // (moving the line's type-B racer into the middle cell once every cell
+    // is filled) identify the middle cell and its distance from wherever B
+    // actually ended up, without having to re-derive line order itself.
     const goals = [];
-    for (const line of lines) for (const c of line.cells) goals.push({ bx: c.fx, by: c.fy, groupId: line.groupId, openDir: line.openDir });
+    for (const line of lines) {
+      const center = (line.cells.length - 1) / 2;
+      line.cells.forEach((c, i) => {
+        goals.push({ bx: c.fx, by: c.fy, groupId: line.groupId, openDir: line.openDir, kind: line.kind, posIndex: i, isCenter: i === center });
+      });
+    }
 
     return { blocksX: size, blocksY: size, blockOpen, openCells, obstacleComponents, goals, cargo, platforms };
   }

@@ -5,7 +5,7 @@ import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng } from './agent4.js?v=13';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng } from './agent4.js?v=14';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -923,6 +923,11 @@ export class Game {
     if (isAgent4) {
       this.agent4LastSeed = this.agent4Seed === -1 ? Math.floor(Math.random() * 2 ** 31) : this.agent4Seed;
       this.agent4Rng = agent4CreateRng(this.agent4LastSeed);
+      // Post-completion "move B to the middle" bookkeeping - see
+      // _agent4CheckLineForRecenter/_updateAgent4Recenter. Fresh per reset.
+      this.agent4LinesResolved = new Set(); // groupIds already checked, no need to re-check
+      this.agent4LinesRecentering = new Set(); // groupIds currently mid-recenter (blocks new arrivals there)
+      this.agent4RecenterQueue = []; // in-flight { racer, path, groupId } jobs, one hop advanced per tick
     }
 
     // Agent mode 2 gets one goal per racer, scattered across the map (the
@@ -1388,6 +1393,13 @@ export class Game {
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
         const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);
         if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(RACER_COLORS[racer.id % RACER_COLORS.length]);
+        // Every arrival at a goal can potentially be the one that completes
+        // its line - re-check that line each time (a cheap no-op once
+        // agent4LinesResolved already has it). This also fires for the
+        // recenter sequence's OWN _applyMapMove calls (the chain-shift, and
+        // B's final step into the center), which is fine - they're already
+        // marked resolved by then, so the check just returns immediately.
+        if (this.mapStrategy === 'agent4' && gi >= 0) this._agent4CheckLineForRecenter(this.mapGoals[gi].groupId);
       }
       return;
     }
@@ -1710,9 +1722,15 @@ export class Game {
   // call, not a persisted claim, so there is nothing to go stale). Once a
   // second-to-last cell fills or a B does arrive, this stops applying on
   // its own - no bookkeeping to clear.
+  //
+  // Also true unconditionally for any cell in a line currently mid-recenter
+  // (agent4LinesRecentering - see _agent4CheckLineForRecenter): the center
+  // cell is briefly, genuinely empty there while its B walks around to enter
+  // it, and type A must not be allowed to slip into it during that window.
   _agent4ReservedForB(x, y) {
     const goal = this.mapGoals.find((g) => g.bx === x && g.by === y);
     if (!goal) return false;
+    if (this.agent4LinesRecentering?.has(goal.groupId)) return true;
     const lineGoals = this.mapGoals.filter((g) => g.groupId === goal.groupId);
     let reachedCount = 0;
     let reachedB = 0;
@@ -1726,6 +1744,107 @@ export class Game {
     }
     if (thisCellReached) return false; // already settled - moot for availability
     return reachedB === 0 && reachedCount === lineGoals.length - 1;
+  }
+
+  // Once a goal line fills up completely, moves its type-B racer to the
+  // line's center cell if it isn't there already - purely a post-completion
+  // repositioning, not a routing/reservation concern, so it runs once
+  // everyone involved has already stopped moving on their own and can't
+  // deadlock with anything still actively pathfinding. Only handles yellow
+  // (kind 0) lines for now - a blue line's entrance side is a solid
+  // platform, not open ground, so there's nowhere for the B to step out
+  // onto (see carveCargoAndEmptySide in agent4.js).
+  //
+  // The move itself, once needed: B steps sideways onto the open entrance
+  // ground next to its own cell (vacating it); the chain of A's between
+  // B's old spot and the center each shift one step toward that gap,
+  // closing it and leaving the center cell empty; B then walks along the
+  // entrance-side row to above the center and steps back in. Every hop is
+  // a single real cell-to-cell move - nothing teleports. This only
+  // COMPUTES that plan and hands it to agent4RecenterQueue -
+  // _updateAgent4Recenter is what actually executes it, one hop at a time,
+  // since the very first hop (B's exit) can't safely assume the entrance
+  // cell is free: a still-'solving' racer could happen to be resting right
+  // there at this exact instant (it's ordinary open ground, nothing marks
+  // it as reserved), so committing to the move here without checking could
+  // stack two racers on one cell.
+  _agent4CheckLineForRecenter(groupId) {
+    if (this.agent4LinesResolved.has(groupId)) return;
+    const lineGoals = this.mapGoals.filter((g) => g.groupId === groupId).sort((a, b) => a.posIndex - b.posIndex);
+    if (!lineGoals.length) return;
+    const occupants = lineGoals.map((g) => this.mapRacers.find((r) => r.status === 'reached' && r.bx === g.bx && r.by === g.by));
+    if (occupants.some((r) => !r)) return; // not every cell filled yet
+
+    this.agent4LinesResolved.add(groupId); // this line is decided, one way or another - never re-check it
+    if (lineGoals[0].kind !== 0) return; // blue line - not handled yet
+
+    const centerIdx = lineGoals.findIndex((g) => g.isCenter);
+    if (occupants[centerIdx].robotType === 'B') return; // already centered
+
+    const bIdx = occupants.findIndex((r) => r.robotType === 'B');
+    if (bIdx === -1) return; // no B ever settled on this line at all - nothing to move
+
+    const openDir = lineGoals[bIdx].openDir;
+    const entranceOf = (i) => ({ fx: lineGoals[i].bx + openDir.dx, fy: lineGoals[i].by + openDir.dy });
+    const step = bIdx < centerIdx ? 1 : -1;
+    // The chain shift itself (every OTHER racer between B's old spot and
+    // the center, each moving into the cell the next one in line just
+    // vacated) is safe to fire in one synchronous batch once B's exit has
+    // actually happened, exactly like agent4ChainYield does elsewhere:
+    // every destination in this loop is a cell we already know (from
+    // `occupants` above) is currently held by a 'reached' racer of this
+    // SAME line, which nothing outside this line can ever step onto (lines
+    // are always >=MIN_LINE_GAP apart) - so there's no external interference
+    // to guard against here, only the exit and the entrance-row walk (both
+    // on ordinary open ground) need the per-hop availability check.
+    const chainSteps = [];
+    for (let i = bIdx; i !== centerIdx; i += step) chainSteps.push({ racer: occupants[i + step], to: { fx: lineGoals[i].bx, fy: lineGoals[i].by } });
+
+    const walkPath = [];
+    for (let i = bIdx + step; ; i += step) {
+      walkPath.push(entranceOf(i));
+      if (i === centerIdx) break;
+    }
+    walkPath.push({ fx: lineGoals[centerIdx].bx, fy: lineGoals[centerIdx].by });
+
+    this.agent4LinesRecentering.add(groupId); // blocks new arrivals here until B is done - see _agent4ReservedForB / lineHasReachedB
+    this.agent4RecenterQueue.push({ phase: 'exit', racer: occupants[bIdx], exitCell: entranceOf(bIdx), chainSteps, walkPath, groupId });
+  }
+
+  // Advances every in-flight agent4CheckLineForRecenter job, one hop per
+  // tick once its racer's last tumble has actually finished (a single
+  // racer's RollingShape can't be handed a new direction while still
+  // mid-tumble from the last one). Two phases:
+  // - 'exit': waiting for B's own vacate-the-line hop to be safe to take;
+  //   once it lands, the chain shift (different racers, always safe - see
+  //   _agent4CheckLineForRecenter) fires immediately in the same tick and
+  //   the job moves on to phase 'walk'.
+  // - 'walk': B's own remaining hops along the entrance row and back into
+  //   the center, one per tick, each re-checked for safety the same way.
+  // Either phase just waits (keeps the job queued, tries again next tick)
+  // if its next cell isn't free yet - ordinary open ground can have an
+  // unrelated still-'solving' racer resting on it - rather than forcing
+  // the move through.
+  _updateAgent4Recenter() {
+    if (!this.agent4RecenterQueue.length) return;
+    this.agent4RecenterQueue = this.agent4RecenterQueue.filter((job) => {
+      if (job.racer.shape.isBusy() || job.racer.pendingDir) return true;
+      if (job.phase === 'exit') {
+        if (!this._mapCellAvailable(job.exitCell.fx, job.exitCell.fy, job.racer)) return true;
+        this._applyMapMove(job.racer, job.exitCell);
+        for (const { racer, to } of job.chainSteps) this._applyMapMove(racer, to);
+        job.phase = 'walk';
+        job.path = job.walkPath;
+        return true;
+      }
+      if (!job.path.length) return false;
+      const next = job.path[0];
+      if (!this._mapCellAvailable(next.fx, next.fy, job.racer)) return true;
+      job.path.shift();
+      this._applyMapMove(job.racer, next);
+      if (!job.path.length) this.agent4LinesRecentering.delete(job.groupId); // just entered the center - already logically occupied, safe to unblock now
+      return job.path.length > 0;
+    });
   }
 
   // Tries to make `next` walkable for `racer` right now by asking whichever
@@ -2229,6 +2348,7 @@ export class Game {
           const p = racer.shape.group.position;
           racer.shadow.position.set(p.x, 0.02, p.z);
         }
+        if (this.mapStrategy === 'agent4') this._updateAgent4Recenter();
         if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
       }
       this._reportStats();
