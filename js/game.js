@@ -1812,24 +1812,32 @@ export class Game {
   }
 
   // Advances every in-flight agent4CheckLineForRecenter job, one hop per
-  // tick once its racer's last tumble has actually finished (a single
-  // racer's RollingShape can't be handed a new direction while still
-  // mid-tumble from the last one). Two phases:
-  // - 'exit': waiting for B's own vacate-the-line hop to be safe to take;
-  //   once it lands, the chain shift (different racers, always safe - see
-  //   _agent4CheckLineForRecenter) fires immediately in the same tick and
-  //   the job moves on to phase 'walk'.
+  // tick once its racer's last tumble has actually finished - RollingShape
+  // silently no-ops startMove() while already busy (see js/roller.js), and
+  // _applyMapMove doesn't check that return value before committing the
+  // logical bx/by move regardless, so calling it on a still-tumbling racer
+  // desyncs its visual position from its grid position (the tumble in
+  // progress plays out and stops, but the racer is now logically somewhere
+  // else - looking, at a glance, like it froze mid-roll). Two phases:
+  // - 'exit': waiting for B's own vacate-the-line hop AND every chain-shift
+  //   racer to be idle before firing all of them in one synchronous batch
+  //   (safe once idle - see _agent4CheckLineForRecenter for why those
+  //   destinations can't collide with each other); the job moves on to
+  //   phase 'walk'. A chain-shift racer can plausibly still be
+  //   mid-tumble here even though every occupant was 'reached' when the
+  //   line was first found complete - completing a move and completing its
+  //   own tumble animation are two different events, and this can run mere
+  //   milliseconds after the very last one landed.
   // - 'walk': B's own remaining hops along the entrance row and back into
   //   the center, one per tick, each re-checked for safety the same way.
-  // Either phase just waits (keeps the job queued, tries again next tick)
-  // if its next cell isn't free yet - ordinary open ground can have an
-  // unrelated still-'solving' racer resting on it - rather than forcing
-  // the move through.
+  // Every wait just keeps the job queued and tries again next tick if
+  // something isn't ready yet, rather than forcing a move through.
   _updateAgent4Recenter() {
     if (!this.agent4RecenterQueue.length) return;
     this.agent4RecenterQueue = this.agent4RecenterQueue.filter((job) => {
       if (job.racer.shape.isBusy() || job.racer.pendingDir) return true;
       if (job.phase === 'exit') {
+        if (job.chainSteps.some(({ racer }) => racer.shape.isBusy() || racer.pendingDir)) return true;
         if (!this._mapCellAvailable(job.exitCell.fx, job.exitCell.fy, job.racer)) return true;
         this._applyMapMove(job.racer, job.exitCell);
         for (const { racer, to } of job.chainSteps) this._applyMapMove(racer, to);
