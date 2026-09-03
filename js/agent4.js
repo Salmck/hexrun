@@ -35,13 +35,19 @@
 //   still zero B" - in that specific case this one cell would stay
 //   permanently unfillable. Accepted for now as a known edge case rather
 //   than adding reservation/claim machinery to close it.
-// - Once a (yellow) line fills up completely, its B physically rolls into
-//   the line's CENTER cell if it isn't there already - see
+// - Once a line fills up completely, its B physically rolls into the line's
+//   CENTER cell if it isn't there already - see
 //   game._agent4CheckLineForRecenter/_updateAgent4Recenter. This is a
 //   post-completion repositioning step, not part of routing at all - it
 //   only ever runs once every cell in that line is already settled, so it
 //   can't interact with or deadlock against anything still actively
-//   pathfinding.
+//   pathfinding. Yellow lines do it by having B step sideways onto the open
+//   entrance ground while the line's own occupants chain-shift to close the
+//   gap; blue lines have no sideways room at all (see
+//   carveCargoAndEmptySide), so instead the WHOLE line rolls along its own
+//   axis in lockstep until B lands on center - see
+//   game._agent4QueueBlueRecenter for why the ground beyond both ends is
+//   forced open far enough in advance to always have room for this.
 
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 
@@ -244,13 +250,21 @@ export function agent4ChooseMove(game, racer) {
     // itself the instant enough of the map is sensed to reveal a bypass, no
     // timer or retry bookkeeping needed. A racer queueing to enter its OWN
     // target's line is unaffected - chain-yield/force-yield below still
-    // handle that shuffle exactly as before.
+    // handle that shuffle exactly as before - UNLESS this specific cell is
+    // in game.agent4LockedCells (see game._agent4QueueBlueRecenter). Those
+    // are the handful of cells a blue recenter shift settled permanently -
+    // a returning drifted racer refilling the gap it left would otherwise
+    // happily chain-yield the freshly-centered B (or another settled
+    // survivor) right back out of position on its way past. The still-open
+    // cells it's actually trying to refill are deliberately never locked,
+    // so this exception (and the ordinary chain-yield/force-yield shuffling
+    // it enables) keeps working exactly as before for reaching THOSE.
     const sensedOpen = (x, y) => {
       if (!game.agent4Sensed.has(`${x},${y}`) || !game.blockGrid.blockOpen(x, y)) return false;
       const occ = game.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y);
       if (!occ) return true;
       const occGoal = game.mapGoals.find((g) => g.bx === x && g.by === y);
-      return !occGoal || occGoal.groupId === target.groupId;
+      return !occGoal || (occGoal.groupId === target.groupId && !game.agent4LockedCells?.has(`${x},${y}`));
     };
     const route = findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
     if (route && route.length >= 2) {
@@ -588,6 +602,16 @@ function placeOneLine(width, height, n, existingLines, gap, rng) {
 // design - see game.js's _startAgent3Celebration), so the platform is safe
 // to butt right up against the goal with no special-cased collision check
 // needed at that point.
+//
+// A BLUE line also gets open ground forced in, past BOTH of its own two
+// ENDS this time (along the line's own axis, not sideways) - exactly
+// centerIdx cells deep, i.e. 1 for a 3-line, 2 for a 5-line. That's the
+// most cells any single occupant could ever need to travel past either end
+// for game.js's post-completion recenter (_agent4QueueBlueRecenter) to
+// roll the WHOLE line into place around its center - since which end ends
+// up needing the room depends on which side of center B happens to land
+// on, both ends get it, forced open unconditionally rather than merely
+// checked-and-retried, the same way the yellow entrance side above is.
 function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformList, rng) {
   const n = line.cells.length;
   const perpPair = line.horizontal ? [[0, -1], [0, 1]] : [[-1, 0], [1, 0]];
@@ -639,6 +663,17 @@ function carveCargoAndEmptySide(grid, width, height, line, cargoList, platformLi
       cargoList.push({ bx: wx, by: wy, groupId: line.groupId, kind, goalBx: cell.fx, goalBy: cell.fy });
       const fx2 = wx + pdx, fy2 = wy + pdy;
       if (inBounds(fx2, fy2, width, height)) grid[fy2][fx2] = false; // behind the crate, forced closed
+    }
+  }
+
+  if (kind === 1) {
+    const [adx, ady] = line.horizontal ? [1, 0] : [0, 1];
+    const maxShift = (n - 1) / 2; // == centerIdx, always (n is always odd)
+    for (const [end, dir] of [[line.cells[0], -1], [line.cells[n - 1], 1]]) {
+      for (let k = 1; k <= maxShift; k++) {
+        const bx = end.fx + adx * dir * k, by = end.fy + ady * dir * k;
+        if (inBounds(bx, by, width, height)) grid[by][bx] = true;
+      }
     }
   }
 }
