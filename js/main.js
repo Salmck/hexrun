@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=122';
+import { Game } from './game.js?v=123';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -24,6 +24,14 @@ const openMapFile = document.getElementById('open-map-file');
 const controlsBreak = document.getElementById('controls-break');
 const colorPanelBtn = document.getElementById('btn-color-panel');
 const colorPanel = document.getElementById('agent4-color-panel');
+const compareStatsPanel = document.getElementById('compare-stats-panel');
+const compareStatDiscover = document.getElementById('compare-stat-discover');
+const compareStatFinish = document.getElementById('compare-stat-finish');
+const compareStatYields = document.getElementById('compare-stat-yields');
+const compareStatSteps = document.getElementById('compare-stat-steps');
+const compareStatTicks = document.getElementById('compare-stat-ticks');
+const compareStatTickMs = document.getElementById('compare-stat-tickms');
+const compareStatProb = document.getElementById('compare-stat-prob');
 
 const game = new Game(canvas, {
   onStats: (stats) => {
@@ -90,7 +98,32 @@ const syncRacerControl = () => {
     compareModeSelect.value = game.compareMode;
   }
   syncColorPanel(usesMapPanel);
+  compareStatsPanel.hidden = !isCompare;
+  if (isCompare) updateCompareStatsPanel();
 };
+
+// Live readout of the current compare-mode run's stats (game.compareStats,
+// filled in by Game#_tick/_applyMapMove/agent2ChainYield/agent2ForceYield -
+// see game.js for exactly where each field comes from). Polled on an
+// interval rather than driven off Game#onStats, since these numbers need to
+// keep reading correctly (and settle on their final values) whether the
+// game is running, paused, or freshly reset - onStats only ever fires while
+// actually running.
+const formatSeconds = (ms) => `${(ms / 1000).toFixed(2)}s`;
+const updateCompareStatsPanel = () => {
+  if (game.mapStrategy !== 'compare') return;
+  const s = game.compareStats;
+  if (!s) return;
+  compareStatDiscover.textContent = s.discoveredAt === null ? '--' : formatSeconds(s.discoveredAt);
+  compareStatFinish.textContent = (s.discoveredAt === null || s.completedAt === null)
+    ? '--' : formatSeconds(s.completedAt - s.discoveredAt);
+  compareStatYields.textContent = String(s.yieldCount);
+  compareStatSteps.textContent = String(game.mapRacers.reduce((sum, r) => sum + r.steps, 0));
+  compareStatTicks.textContent = String(s.tickCount);
+  compareStatTickMs.textContent = s.tickCount ? `${(s.totalTickMs / s.tickCount).toFixed(3)}ms` : '--';
+  compareStatProb.textContent = String(game.compareObstacleProbability);
+};
+setInterval(updateCompareStatsPanel, 200);
 
 // Rebuilds the color panel to match the CURRENT racer set (one swatch per
 // racer, labeled by index only - the palette is keyed by index, not robot

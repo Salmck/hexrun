@@ -214,6 +214,9 @@ function agent2ChainYield(game, parked) {
   // chain[0] is now empty - reset its marker to neutral until someone lands.
   const gi = game.mapGoals.findIndex((g) => g.bx === chain[0].bx && g.by === chain[0].by);
   if (gi >= 0) game.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+  // compareStats only exists in compare mode (see Game#_setupMapMode) - a
+  // no-op check here means plain agent2 play is completely unaffected.
+  if (game.compareStats) game.compareStats.yieldCount++;
   return true;
 }
 
@@ -234,6 +237,7 @@ function agent2ForceYield(game, parked) {
   parked.path = null;
   parked.status = 'solving';
   game._applyMapMove(parked, dest);
+  if (game.compareStats) game.compareStats.yieldCount++;
   return true;
 }
 

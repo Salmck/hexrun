@@ -3,10 +3,10 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
-import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=85';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=86';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=16';
-import { compareSetupState, compareChooseMove } from './compare.js?v=1';
+import { compareSetupState, compareChooseMove } from './compare.js?v=2';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -45,6 +45,11 @@ const RACER_COLORS = [0xf28b82, 0xfbbc04, 0xffd666, 0x81c995, 0x78d9ec, 0x8ab4f8
 // every index a real session could ever use has its own slot.
 const AGENT4_PALETTE_SIZE = 30;
 const AGENT4_PALETTE_STORAGE_KEY = 'hexrun-agent4-palette';
+// Named (rather than inlined) so compare mode's stats panel can display
+// exactly the value its own map was actually generated with - happens to
+// match generateObstacleGrid's own default, used as-is by every other
+// obstacle-based mode.
+const COMPARE_OBSTACLE_PROBABILITY = 0.32;
 
 // Each maze room/passage is expanded into MAZE_RATIO x MAZE_RATIO movement
 // cells, so every corridor is MAZE_RATIO steps wide - at MAZE_RATIO=2 that's
@@ -106,6 +111,10 @@ export class Game {
     this.compareSeed = -1;
     this.compareLastSeed = null;
     this.compareMode = 'a';
+    // Exposed as a plain field (rather than main.js importing the module
+    // constant directly) purely so the stats panel can read it the same way
+    // it reads every other compare* field.
+    this.compareObstacleProbability = COMPARE_OBSTACLE_PROBABILITY;
     // A fixed-length palette of AGENT4_PALETTE_SIZE colors, shared across
     // every agent-4 session on this machine - racer id `i` always uses
     // palette[i % length], so a given index's color never shifts just
@@ -1198,6 +1207,19 @@ export class Game {
     if (isCompare) {
       this.compareLastSeed = this.compareSeed === -1 ? Math.floor(Math.random() * 2 ** 31) : this.compareSeed;
       this.compareRng = agent4CreateRng(this.compareLastSeed);
+      // Fresh per reset - see _tick (elapsedMs/tickCount/totalTickMs),
+      // _applyMapMove (discoveredAt/completedAt), and agent2ChainYield/
+      // agent2ForceYield (yieldCount) for where each field is filled in.
+      // elapsedMs only ever advances while actually running (see _tick), so
+      // pausing to inspect the map mid-run doesn't count against these.
+      this.compareStats = {
+        elapsedMs: 0,
+        discoveredAt: null,
+        completedAt: null,
+        yieldCount: 0,
+        tickCount: 0,
+        totalTickMs: 0,
+      };
     }
 
     // Agent mode 2 (and the comparison-experiment mode, which reuses agent2's
@@ -1227,7 +1249,7 @@ export class Game {
       const nominalSize = isAgent3 ? MAP_SIZE : this.agent4MapSize;
       if (this.cameraOrbit) this.cameraOrbit.radius = 190 * (this.blockGrid.blocksX / nominalSize);
     } else if (isCompare) {
-      this.blockGrid = generateObstacleGrid(this.compareMapSize, this.compareMapSize, this.compareRng, 0.32, scaledMinComponents(this.compareMapSize));
+      this.blockGrid = generateObstacleGrid(this.compareMapSize, this.compareMapSize, this.compareRng, COMPARE_OBSTACLE_PROBABILITY, scaledMinComponents(this.compareMapSize));
       goalCells = pickScatteredGoals(this, this.blockGrid.openCells, this.racerCount, this.compareRng);
       this.mapGoals = goalCells.map((c) => ({ bx: c.fx, by: c.fy }));
       if (this.cameraOrbit) this.cameraOrbit.radius = 190 * (this.blockGrid.blocksX / this.compareMapSize);
@@ -1690,6 +1712,12 @@ export class Game {
       if (this.mapStrategy === 'agent2' || this.mapStrategy === 'compare') agent2Sense(this, racer);
       else if (this.mapStrategy === 'agent3') agent3Sense(this, racer);
       else agent4Sense(this, racer);
+      // compareStats only exists in compare mode - every check here is a
+      // no-op for every other strategy.
+      if (this.compareStats && this.compareStats.discoveredAt === null &&
+          this.mapGoals.some((g) => this.agent2Sensed.has(`${g.bx},${g.by}`))) {
+        this.compareStats.discoveredAt = this.compareStats.elapsedMs;
+      }
       if (this._isMapGoal(racer.bx, racer.by)) {
         racer.status = 'reached';
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
@@ -1702,6 +1730,10 @@ export class Game {
         // B's final step into the center), which is fine - they're already
         // marked resolved by then, so the check just returns immediately.
         if (this.mapStrategy === 'agent4' && gi >= 0) this._agent4CheckLineForRecenter(this.mapGoals[gi].groupId);
+        if (this.compareStats && this.compareStats.completedAt === null &&
+            this.mapRacers.every((r) => r.status === 'reached')) {
+          this.compareStats.completedAt = this.compareStats.elapsedMs;
+        }
       }
       return;
     }
@@ -2737,6 +2769,14 @@ export class Game {
           racer.shadow.position.set(p.x, 0.02, p.z);
         }
       } else {
+        // compareStats only exists in compare mode - elapsedMs (used for
+        // discoveredAt/completedAt in _applyMapMove too) only ever advances
+        // while actually running, so pausing to inspect the map doesn't
+        // count against it; totalTickMs/tickCount measure the REAL
+        // (wall-clock) cost of this tick's decision-making, separately from
+        // the simulated dt.
+        const perfStart = this.compareStats ? performance.now() : 0;
+        if (this.compareStats) this.compareStats.elapsedMs += dt;
         for (const racer of this.mapRacers) {
           if (!racer.shape.isBusy()) {
             if (racer.pendingDir) {
@@ -2755,6 +2795,10 @@ export class Game {
         }
         if (this.mapStrategy === 'agent4') this._updateAgent4Recenter();
         if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
+        if (this.compareStats) {
+          this.compareStats.tickCount++;
+          this.compareStats.totalTickMs += performance.now() - perfStart;
+        }
       }
       this._reportStats();
     }

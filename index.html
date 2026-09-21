@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>翻滚多面体 · 障碍模拟</title>
-  <link rel="stylesheet" href="style.css?v=7" />
+  <link rel="stylesheet" href="style.css?v=8" />
   <script type="importmap">
     {
       "imports": {
@@ -79,8 +79,23 @@
          btn-color-panel. Populated dynamically (one swatch per current
          racer) by main.js's syncColorPanel. -->
     <div id="agent4-color-panel" hidden></div>
+
+    <!-- Compare mode only - a small always-on readout of the current run's
+         stats (see main.js's updateCompareStatsPanel, polled on an
+         interval so it keeps advancing/settles correctly even though it
+         isn't driven by Game#onStats). Rows are static; only the values get
+         rewritten. -->
+    <div id="compare-stats-panel" hidden>
+      <div class="stat-row"><span>发现目标耗时</span><span id="compare-stat-discover">--</span></div>
+      <div class="stat-row"><span>发现到完成耗时</span><span id="compare-stat-finish">--</span></div>
+      <div class="stat-row"><span>总让位次数</span><span id="compare-stat-yields">0</span></div>
+      <div class="stat-row"><span>总步数</span><span id="compare-stat-steps">0</span></div>
+      <div class="stat-row"><span>总轮数</span><span id="compare-stat-ticks">0</span></div>
+      <div class="stat-row"><span>平均每轮耗时</span><span id="compare-stat-tickms">--</span></div>
+      <div class="stat-row"><span>障碍物生成概率</span><span id="compare-stat-prob">--</span></div>
+    </div>
   </div>
 
-  <script type="module" src="js/main.js?v=124"></script>
+  <script type="module" src="js/main.js?v=125"></script>
 </body>
 </html>

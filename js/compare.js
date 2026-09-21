@@ -15,7 +15,7 @@
 // own routing verbatim, unchanged - this module is only the seam where each
 // one will eventually get its own distinct implementation to compare against
 // the others on identical maps.
-import { agent2SetupState, agent2ChooseMove } from './agent2.js?v=85';
+import { agent2SetupState, agent2ChooseMove } from './agent2.js?v=86';
 
 export function compareSetupState(game, starts) {
   agent2SetupState(game, starts);

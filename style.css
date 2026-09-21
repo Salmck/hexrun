@@ -238,6 +238,36 @@ html, body {
   border-radius: 5px;
 }
 
+#compare-stats-panel {
+  position: absolute;
+  top: 90px;
+  left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 168px;
+  background: rgba(20, 24, 31, 0.75);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(6px);
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 12px;
+  color: #d8d2c8;
+  pointer-events: none;
+}
+
+#compare-stats-panel .stat-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  white-space: nowrap;
+}
+
+#compare-stats-panel .stat-row span:last-child {
+  color: #e8b7a0;
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 640px) {
   #hud {
     flex-direction: column;
