@@ -254,22 +254,24 @@ export class Game {
   }
 
   // Builds this round's trace frame (see compareTrace/_setupMapMode) and
-  // appends it - `before` is the {positions, sensed} snapshot _tick took
-  // right before this round's decisions ran, so a racer's movingDir is just
-  // "did bx/by change, and by how much", with dx/dy reported directly
-  // rather than guessing a compass label onto the game's own grid axes.
-  // newlyExplored is the diff against the sensed-cells snapshot, since
-  // agent2Sensed only ever grows - recording the whole set every round
-  // would mean re-saving almost the same (and, late in a run, very large)
-  // list over and over.
-  _compareRecordTraceFrame(before) {
-    const newlyExplored = [];
-    for (const k of this.agent2Sensed) {
-      if (before.sensed.has(k)) continue;
-      newlyExplored.push(k.split(',').map(Number));
-    }
+  // appends it - `beforePositions` is the snapshot _tick took right before
+  // this round's decisions ran, so a racer's movingDir is just "did bx/by
+  // change, and by how much", with dx/dy reported directly rather than
+  // guessing a compass label onto the game's own grid axes.
+  //
+  // exploredMask is the FULL current shared-vision state (every cell,
+  // discovered or not, this round) - not a diff against the previous round
+  // - run-length-encoded via _rleEncodeGrid so recording the whole grid
+  // every single round doesn't mean paying blocksX*blocksY cost per round:
+  // exploration only ever grows and stays in large contiguous blocks, so
+  // the encoded form stays tiny (a handful of numbers) even deep into a
+  // long run on a big map. See _rleEncodeGrid's own comment for the exact
+  // format and how to decode it back into a full grid.
+  _compareRecordTraceFrame(beforePositions) {
+    const { blocksX, blocksY } = this.blockGrid;
+    const exploredMask = this._rleEncodeGrid(blocksX, blocksY, (x, y) => this.agent2Sensed.has(`${x},${y}`));
     const racers = this.mapRacers.map((r, i) => {
-      const prev = before.positions[i];
+      const prev = beforePositions[i];
       const dx = r.bx - prev.bx, dy = r.by - prev.by;
       return {
         id: r.id,
@@ -287,16 +289,45 @@ export class Game {
     });
     const yields = this.compareStats.pendingYields;
     this.compareStats.pendingYields = [];
-    this.compareTrace.push({ round: this.compareStats.tickCount, newlyExplored, racers, yields });
+    this.compareTrace.push({ round: this.compareStats.tickCount, exploredMask, racers, yields });
+  }
+
+  // Run-length-encodes a blocksX x blocksY boolean grid (row-major, index =
+  // y*blocksX+x) as an array of alternating run lengths, always starting
+  // with however many cells are false (possibly 0) - e.g. for blocksX=4 the
+  // rows [F,F,F,T] [T,F,T,T] flatten to F,F,F,T,T,F,T,T -> run lengths
+  // [3,2,1,2]. Decoding: start with value=false, consume the runs in order,
+  // emitting that many of the CURRENT value each time and flipping value
+  // between runs - the array's own length says nothing about which value
+  // came last, so a decoder just keeps going until it has emitted
+  // blocksX*blocksY cells total.
+  _rleEncodeGrid(blocksX, blocksY, isSet) {
+    const total = blocksX * blocksY;
+    const runs = [];
+    let current = false;
+    let count = 0;
+    for (let i = 0; i < total; i++) {
+      const bit = isSet(i % blocksX, Math.floor(i / blocksX));
+      if (bit === current) {
+        count++;
+      } else {
+        runs.push(count);
+        current = bit;
+        count = 1;
+      }
+    }
+    runs.push(count);
+    return runs;
   }
 
   // The full per-round recording for saveCompareMap's trace export: static
   // map/racer info once at the top (walls, goals, each racer's fixed body
   // and path-dot colors), then compareTrace verbatim - every round's racer
-  // positions/status/intended movement/current A*-dot path, newly explored
-  // (shared-vision) cells, and any yield events, so the whole run can be
-  // reconstructed and inspected frame by frame afterward without needing
-  // the live game state at all.
+  // positions/status/intended movement/current A*-dot path, the FULL
+  // shared-vision state (see _rleEncodeGrid - every round on its own, not a
+  // diff against the last one, but compact regardless), and any yield
+  // events, so any single round can be reconstructed and inspected in
+  // isolation without needing to replay every round before it.
   _compareBuildTraceExport() {
     const { blocksX, blocksY, blockOpen } = this.blockGrid;
     const walls = [];
@@ -327,9 +358,18 @@ export class Game {
       completedAtRound: this.compareStats?.completedAt ?? null,
       totalYields: this.compareStats?.yieldCount ?? 0,
       totalRounds: this.compareStats?.tickCount ?? 0,
-      // Each frame's movingDir is {dx, dy} in grid-cell units (one of
-      // {dx:1,dy:0}/{dx:-1,dy:0}/{dx:0,dy:1}/{dx:0,dy:-1}), not a compass
-      // label - dx is the map's own bx axis, dy its by axis.
+      // Documented here (not just in code comments) since this file is
+      // meant to stand on its own: each frame's movingDir is {dx, dy} in
+      // grid-cell units (one of {dx:1,dy:0}/{dx:-1,dy:0}/{dx:0,dy:1}/
+      // {dx:0,dy:-1}), not a compass label - dx is the map's own bx axis,
+      // dy its by axis. Each frame's exploredMask is that round's FULL
+      // shared-vision state (every one of blocksX*blocksY cells, row-major,
+      // index = y*blocksX+x), run-length-encoded as alternating
+      // [falseRunLength, trueRunLength, falseRunLength, ...] (the first run
+      // is always "false", even if 0 cells long) - decode by walking the
+      // grid in that same row-major order, emitting `false` for the first
+      // run's length, then `true` for the next, alternating, until all
+      // blocksX*blocksY cells are filled in.
       frames: this.compareTrace || [],
     };
   }
@@ -487,7 +527,11 @@ export class Game {
     if (canvas) this._downloadDataUrl(`hexrun-compare-map-${stamp}.png`, canvas.toDataURL('image/png'));
     // Third file: a full frame-by-frame recording of the run so far (empty
     // if it hasn't been run yet) - see _compareBuildTraceExport/compareTrace.
-    this._downloadText(`hexrun-compare-map-${stamp}-trace.json`, JSON.stringify(this._compareBuildTraceExport(), null, 2), 'application/json');
+    // Not pretty-printed (unlike the small config file above) - it's meant
+    // for a script to read back, not a person, and the indentation/newlines
+    // alone can easily double or triple the size of a file already this
+    // repetitive.
+    this._downloadText(`hexrun-compare-map-${stamp}-trace.json`, JSON.stringify(this._compareBuildTraceExport()), 'application/json');
   }
 
   // Parses and applies a map recipe previously produced by saveCompareMap -
@@ -2909,8 +2953,8 @@ export class Game {
         // trace export below - lets each racer's movingDir be read off as a
         // plain "did bx/by change, and which way" diff afterward, with no
         // need to instrument _applyMapMove itself.
-        const traceBefore = compareRunning
-          ? { positions: this.mapRacers.map((r) => ({ bx: r.bx, by: r.by })), sensed: new Set(this.agent2Sensed) }
+        const tracePositionsBefore = compareRunning
+          ? this.mapRacers.map((r) => ({ bx: r.bx, by: r.by }))
           : null;
         for (const racer of this.mapRacers) {
           if (!racer.shape.isBusy()) {
@@ -2932,7 +2976,7 @@ export class Game {
         if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
         if (compareRunning) {
           this.compareStats.totalTickMs += performance.now() - perfStart;
-          this._compareRecordTraceFrame(traceBefore);
+          this._compareRecordTraceFrame(tracePositionsBefore);
         }
       }
       this._reportStats();
