@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>翻滚多面体 · 障碍模拟</title>
-  <link rel="stylesheet" href="style.css?v=8" />
+  <link rel="stylesheet" href="style.css?v=9" />
   <script type="importmap">
     {
       "imports": {
@@ -64,6 +64,10 @@
           <option value="c">C</option>
         </select>
       </label>
+      <label id="compare-prob-label" hidden>
+        障碍物概率
+        <input id="compare-prob" type="number" min="0" max="0.6" step="0.01" value="0.32" inputmode="decimal" />
+      </label>
       <label id="speed-label">
         速度
         <select id="speed">
@@ -86,16 +90,15 @@
          isn't driven by Game#onStats). Rows are static; only the values get
          rewritten. -->
     <div id="compare-stats-panel" hidden>
-      <div class="stat-row"><span>发现目标耗时</span><span id="compare-stat-discover">--</span></div>
-      <div class="stat-row"><span>发现到完成耗时</span><span id="compare-stat-finish">--</span></div>
+      <div class="stat-row"><span>发现目标轮数</span><span id="compare-stat-discover">--</span></div>
+      <div class="stat-row"><span>发现到完成轮数</span><span id="compare-stat-finish">--</span></div>
       <div class="stat-row"><span>总让位次数</span><span id="compare-stat-yields">0</span></div>
       <div class="stat-row"><span>总步数</span><span id="compare-stat-steps">0</span></div>
       <div class="stat-row"><span>总轮数</span><span id="compare-stat-ticks">0</span></div>
       <div class="stat-row"><span>平均每轮耗时</span><span id="compare-stat-tickms">--</span></div>
-      <div class="stat-row"><span>障碍物生成概率</span><span id="compare-stat-prob">--</span></div>
     </div>
   </div>
 
-  <script type="module" src="js/main.js?v=125"></script>
+  <script type="module" src="js/main.js?v=126"></script>
 </body>
 </html>

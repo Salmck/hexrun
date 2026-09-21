@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=123';
+import { Game } from './game.js?v=124';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -18,6 +18,8 @@ const agent4SeedLabel = document.getElementById('agent4-seed-label');
 const agent4SeedInput = document.getElementById('agent4-seed');
 const compareModeLabel = document.getElementById('compare-mode-label');
 const compareModeSelect = document.getElementById('compare-mode');
+const compareProbLabel = document.getElementById('compare-prob-label');
+const compareProbInput = document.getElementById('compare-prob');
 const saveMapBtn = document.getElementById('btn-save-map');
 const openMapBtn = document.getElementById('btn-open-map');
 const openMapFile = document.getElementById('open-map-file');
@@ -31,7 +33,6 @@ const compareStatYields = document.getElementById('compare-stat-yields');
 const compareStatSteps = document.getElementById('compare-stat-steps');
 const compareStatTicks = document.getElementById('compare-stat-ticks');
 const compareStatTickMs = document.getElementById('compare-stat-tickms');
-const compareStatProb = document.getElementById('compare-stat-prob');
 
 const game = new Game(canvas, {
   onStats: (stats) => {
@@ -86,6 +87,7 @@ const syncRacerControl = () => {
   agent4MapSizeLabel.hidden = !usesMapPanel;
   agent4SeedLabel.hidden = !usesMapPanel;
   compareModeLabel.hidden = !isCompare;
+  compareProbLabel.hidden = !isCompare;
   saveMapBtn.hidden = !usesMapPanel;
   openMapBtn.hidden = !usesMapPanel;
   controlsBreak.hidden = !usesMapPanel;
@@ -96,6 +98,7 @@ const syncRacerControl = () => {
     agent4MapSizeInput.value = String(game.compareMapSize);
     agent4SeedInput.value = String(game.compareSeed);
     compareModeSelect.value = game.compareMode;
+    compareProbInput.value = String(game.compareObstacleProbability);
   }
   syncColorPanel(usesMapPanel);
   compareStatsPanel.hidden = !isCompare;
@@ -108,20 +111,22 @@ const syncRacerControl = () => {
 // interval rather than driven off Game#onStats, since these numbers need to
 // keep reading correctly (and settle on their final values) whether the
 // game is running, paused, or freshly reset - onStats only ever fires while
-// actually running.
-const formatSeconds = (ms) => `${(ms / 1000).toFixed(2)}s`;
+// actually running. discoveredAt/completedAt are round numbers (tickCount's
+// value at that moment), not timestamps - see game.js's _tick, which stops
+// advancing tickCount for good once completedAt is set, so 总轮数 itself
+// also stops the instant every racer has reached a goal instead of idling
+// upward forever.
 const updateCompareStatsPanel = () => {
   if (game.mapStrategy !== 'compare') return;
   const s = game.compareStats;
   if (!s) return;
-  compareStatDiscover.textContent = s.discoveredAt === null ? '--' : formatSeconds(s.discoveredAt);
+  compareStatDiscover.textContent = s.discoveredAt === null ? '--' : String(s.discoveredAt);
   compareStatFinish.textContent = (s.discoveredAt === null || s.completedAt === null)
-    ? '--' : formatSeconds(s.completedAt - s.discoveredAt);
+    ? '--' : String(s.completedAt - s.discoveredAt);
   compareStatYields.textContent = String(s.yieldCount);
   compareStatSteps.textContent = String(game.mapRacers.reduce((sum, r) => sum + r.steps, 0));
   compareStatTicks.textContent = String(s.tickCount);
   compareStatTickMs.textContent = s.tickCount ? `${(s.totalTickMs / s.tickCount).toFixed(3)}ms` : '--';
-  compareStatProb.textContent = String(game.compareObstacleProbability);
 };
 setInterval(updateCompareStatsPanel, 200);
 
@@ -251,6 +256,16 @@ compareModeSelect.addEventListener('change', () => {
   syncColorPanel(true); // regenerated the map - racer count may have changed
   syncToggleButton();
 });
+
+// Same 'change'-only timing as map size/seed above, for the same reason.
+const applyCompareObstacleProb = () => {
+  if (compareProbInput.value === '') return;
+  const prob = game.setCompareObstacleProbability(Number(compareProbInput.value));
+  compareProbInput.value = String(prob);
+  syncColorPanel(true); // regenerated the map - racer count may have changed
+  syncToggleButton();
+};
+compareProbInput.addEventListener('change', applyCompareObstacleProb);
 
 saveMapBtn.addEventListener('click', () => {
   game.saveMapConfig();

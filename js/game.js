@@ -45,11 +45,13 @@ const RACER_COLORS = [0xf28b82, 0xfbbc04, 0xffd666, 0x81c995, 0x78d9ec, 0x8ab4f8
 // every index a real session could ever use has its own slot.
 const AGENT4_PALETTE_SIZE = 30;
 const AGENT4_PALETTE_STORAGE_KEY = 'hexrun-agent4-palette';
-// Named (rather than inlined) so compare mode's stats panel can display
-// exactly the value its own map was actually generated with - happens to
-// match generateObstacleGrid's own default, used as-is by every other
-// obstacle-based mode.
-const COMPARE_OBSTACLE_PROBABILITY = 0.32;
+// Compare mode's own default obstacle-generation probability - matches
+// generateObstacleGrid's own default (used as-is by every other
+// obstacle-based mode), but compare's is user-adjustable per session (see
+// setCompareObstacleProbability) and saved/loaded with the map, so it lives
+// as a per-instance field (compareObstacleProbability) seeded from this
+// constant rather than being read directly.
+const DEFAULT_COMPARE_OBSTACLE_PROBABILITY = 0.32;
 
 // Each maze room/passage is expanded into MAZE_RATIO x MAZE_RATIO movement
 // cells, so every corridor is MAZE_RATIO steps wide - at MAZE_RATIO=2 that's
@@ -111,10 +113,11 @@ export class Game {
     this.compareSeed = -1;
     this.compareLastSeed = null;
     this.compareMode = 'a';
-    // Exposed as a plain field (rather than main.js importing the module
-    // constant directly) purely so the stats panel can read it the same way
-    // it reads every other compare* field.
-    this.compareObstacleProbability = COMPARE_OBSTACLE_PROBABILITY;
+    // User-adjustable (see setCompareObstacleProbability) and saved/loaded
+    // with the map (see saveCompareMap/loadCompareMapConfig) - unlike every
+    // other obstacle-based mode, which just uses generateObstacleGrid's own
+    // built-in default.
+    this.compareObstacleProbability = DEFAULT_COMPARE_OBSTACLE_PROBABILITY;
     // A fixed-length palette of AGENT4_PALETTE_SIZE colors, shared across
     // every agent-4 session on this machine - racer id `i` always uses
     // palette[i % length], so a given index's color never shifts just
@@ -235,6 +238,19 @@ export class Game {
     this.compareMode = next;
     this.reset();
     return this.compareMode;
+  }
+
+  // Clamped well short of generateObstacleGrid's own breaking point (it
+  // gives up after 300 failed attempts at finding a connected layout, which
+  // gets more likely the higher this goes, especially on a small map) - 0.6
+  // is already a noticeably dense, maze-like map.
+  setCompareObstacleProbability(p) {
+    const n = Number(p);
+    const next = Number.isFinite(n) ? Math.max(0, Math.min(0.6, n)) : DEFAULT_COMPARE_OBSTACLE_PROBABILITY;
+    if (next === this.compareObstacleProbability) return this.compareObstacleProbability;
+    this.compareObstacleProbability = next;
+    this.reset();
+    return this.compareObstacleProbability;
   }
 
   // Builds AGENT4_PALETTE_SIZE default colors (golden-ratio hue steps, so
@@ -368,11 +384,12 @@ export class Game {
     const stamp = `${this.compareMapSize}x${this.compareMapSize}-r${this.racerCount}-seed${this.compareLastSeed}`;
     const config = {
       kind: 'hexrun-compare-map',
-      version: 1,
+      version: 2,
       mapSize: this.compareMapSize,
       racerCount: this.racerCount,
       seed: this.compareLastSeed,
       compareMode: this.compareMode,
+      obstacleProbability: this.compareObstacleProbability,
       colorPalette: this.agent4ColorPalette.map((n) => `#${n.toString(16).padStart(6, '0')}`),
     };
     this._downloadText(`hexrun-compare-map-${stamp}.json`, JSON.stringify(config, null, 2), 'application/json');
@@ -395,6 +412,11 @@ export class Game {
     const seed = Math.round(cfg.seed);
     this.compareSeed = Number.isFinite(seed) ? seed : -1;
     this.compareMode = ['a', 'b', 'c'].includes(cfg.compareMode) ? cfg.compareMode : 'a';
+    // A file saved before obstacleProbability existed (version 1) has no
+    // such field - keeps whatever's already set, same fallback pattern as
+    // colorPalette below.
+    const prob = Number(cfg.obstacleProbability);
+    if (Number.isFinite(prob)) this.compareObstacleProbability = Math.max(0, Math.min(0.6, prob));
     if (Array.isArray(cfg.colorPalette)) {
       cfg.colorPalette.forEach((s, i) => {
         if (i >= this.agent4ColorPalette.length) return;
@@ -535,7 +557,7 @@ export class Game {
     ctx.font = '13px monospace';
     ctx.textBaseline = 'top';
     ctx.fillText(
-      `hexrun 对比试验  size=${this.compareMapSize}  racers=${this.racerCount}  mode=${this.compareMode}  seed=${this.compareLastSeed}`,
+      `hexrun 对比试验  size=${this.compareMapSize}  racers=${this.racerCount}  mode=${this.compareMode}  prob=${this.compareObstacleProbability}  seed=${this.compareLastSeed}`,
       pad, 8
     );
 
@@ -1207,18 +1229,19 @@ export class Game {
     if (isCompare) {
       this.compareLastSeed = this.compareSeed === -1 ? Math.floor(Math.random() * 2 ** 31) : this.compareSeed;
       this.compareRng = agent4CreateRng(this.compareLastSeed);
-      // Fresh per reset - see _tick (elapsedMs/tickCount/totalTickMs),
-      // _applyMapMove (discoveredAt/completedAt), and agent2ChainYield/
-      // agent2ForceYield (yieldCount) for where each field is filled in.
-      // elapsedMs only ever advances while actually running (see _tick), so
-      // pausing to inspect the map mid-run doesn't count against these.
+      // Fresh per reset - see _tick (tickCount/totalTickMs), _applyMapMove
+      // (discoveredAt/completedAt), and agent2ChainYield/agent2ForceYield
+      // (yieldCount) for where each field is filled in. tickCount only ever
+      // advances while actually running AND not yet complete (see _tick) -
+      // pausing doesn't count against it, and once every racer has reached
+      // a goal the round count stops for good instead of idling upward
+      // forever.
       this.compareStats = {
-        elapsedMs: 0,
-        discoveredAt: null,
-        completedAt: null,
+        discoveredAt: null, // tickCount's value the round a goal was first sensed
+        completedAt: null, // tickCount's value the round every racer settled
         yieldCount: 0,
         tickCount: 0,
-        totalTickMs: 0,
+        totalTickMs: 0, // real (wall-clock) cost of every counted round, for totalTickMs/tickCount
       };
     }
 
@@ -1249,7 +1272,7 @@ export class Game {
       const nominalSize = isAgent3 ? MAP_SIZE : this.agent4MapSize;
       if (this.cameraOrbit) this.cameraOrbit.radius = 190 * (this.blockGrid.blocksX / nominalSize);
     } else if (isCompare) {
-      this.blockGrid = generateObstacleGrid(this.compareMapSize, this.compareMapSize, this.compareRng, COMPARE_OBSTACLE_PROBABILITY, scaledMinComponents(this.compareMapSize));
+      this.blockGrid = generateObstacleGrid(this.compareMapSize, this.compareMapSize, this.compareRng, this.compareObstacleProbability, scaledMinComponents(this.compareMapSize));
       goalCells = pickScatteredGoals(this, this.blockGrid.openCells, this.racerCount, this.compareRng);
       this.mapGoals = goalCells.map((c) => ({ bx: c.fx, by: c.fy }));
       if (this.cameraOrbit) this.cameraOrbit.radius = 190 * (this.blockGrid.blocksX / this.compareMapSize);
@@ -1716,7 +1739,7 @@ export class Game {
       // no-op for every other strategy.
       if (this.compareStats && this.compareStats.discoveredAt === null &&
           this.mapGoals.some((g) => this.agent2Sensed.has(`${g.bx},${g.by}`))) {
-        this.compareStats.discoveredAt = this.compareStats.elapsedMs;
+        this.compareStats.discoveredAt = this.compareStats.tickCount;
       }
       if (this._isMapGoal(racer.bx, racer.by)) {
         racer.status = 'reached';
@@ -1732,7 +1755,7 @@ export class Game {
         if (this.mapStrategy === 'agent4' && gi >= 0) this._agent4CheckLineForRecenter(this.mapGoals[gi].groupId);
         if (this.compareStats && this.compareStats.completedAt === null &&
             this.mapRacers.every((r) => r.status === 'reached')) {
-          this.compareStats.completedAt = this.compareStats.elapsedMs;
+          this.compareStats.completedAt = this.compareStats.tickCount;
         }
       }
       return;
@@ -2769,14 +2792,20 @@ export class Game {
           racer.shadow.position.set(p.x, 0.02, p.z);
         }
       } else {
-        // compareStats only exists in compare mode - elapsedMs (used for
-        // discoveredAt/completedAt in _applyMapMove too) only ever advances
-        // while actually running, so pausing to inspect the map doesn't
-        // count against it; totalTickMs/tickCount measure the REAL
-        // (wall-clock) cost of this tick's decision-making, separately from
-        // the simulated dt.
-        const perfStart = this.compareStats ? performance.now() : 0;
-        if (this.compareStats) this.compareStats.elapsedMs += dt;
+        // compareStats only exists in compare mode. tickCount/totalTickMs
+        // only advance while actually running AND the run isn't already
+        // complete (completedAt === null) - pausing doesn't count against
+        // them, and once every racer has settled the round count stops for
+        // good instead of idling upward forever while the finished map just
+        // sits there. tickCount is bumped FIRST, before this round's own
+        // decisions run, so a discovery/completion _applyMapMove detects
+        // during this very tick (see there) reports the round it actually
+        // happened on, not the count from before it. totalTickMs measures
+        // the REAL (wall-clock) cost of a counted round's decision-making,
+        // separately from the simulated dt.
+        const compareRunning = this.compareStats && this.compareStats.completedAt === null;
+        const perfStart = compareRunning ? performance.now() : 0;
+        if (compareRunning) this.compareStats.tickCount++;
         for (const racer of this.mapRacers) {
           if (!racer.shape.isBusy()) {
             if (racer.pendingDir) {
@@ -2795,10 +2824,7 @@ export class Game {
         }
         if (this.mapStrategy === 'agent4') this._updateAgent4Recenter();
         if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
-        if (this.compareStats) {
-          this.compareStats.tickCount++;
-          this.compareStats.totalTickMs += performance.now() - perfStart;
-        }
+        if (compareRunning) this.compareStats.totalTickMs += performance.now() - perfStart;
       }
       this._reportStats();
     }

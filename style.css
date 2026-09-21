@@ -152,7 +152,8 @@ html, body {
 #racer-label,
 #agent4-mapsize-label,
 #agent4-seed-label,
-#compare-mode-label {
+#compare-mode-label,
+#compare-prob-label {
   font-size: 12px;
   color: #d8d2c8;
   display: flex;
@@ -167,7 +168,8 @@ html, body {
 #racer-label input,
 #agent4-mapsize-label input,
 #agent4-seed-label input,
-#compare-mode-label select {
+#compare-mode-label select,
+#compare-prob-label input {
   background: rgba(0, 0, 0, 0.3);
   color: #ece6df;
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -182,7 +184,8 @@ html, body {
   text-align: center;
 }
 
-#agent4-seed-label input {
+#agent4-seed-label input,
+#compare-prob-label input {
   width: 68px;
   text-align: center;
 }
@@ -241,7 +244,7 @@ html, body {
 #compare-stats-panel {
   position: absolute;
   top: 90px;
-  left: 18px;
+  right: 18px;
   display: flex;
   flex-direction: column;
   gap: 4px;
