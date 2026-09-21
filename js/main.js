@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=119';
+import { Game } from './game.js?v=120';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -20,6 +20,8 @@ const saveMapBtn = document.getElementById('btn-save-map');
 const openMapBtn = document.getElementById('btn-open-map');
 const openMapFile = document.getElementById('open-map-file');
 const controlsBreak = document.getElementById('controls-break');
+const colorPanelBtn = document.getElementById('btn-color-panel');
+const colorPanel = document.getElementById('agent4-color-panel');
 
 const game = new Game(canvas, {
   onStats: (stats) => {
@@ -73,7 +75,48 @@ const syncRacerControl = () => {
     agent4MapSizeInput.value = String(game.agent4MapSize);
     agent4SeedInput.value = String(game.agent4Seed);
   }
+  syncColorPanel(isAgent4);
 };
+
+// Rebuilds the color panel to match the CURRENT racer set (one swatch per
+// racer, labeled by id and robot type) - called from syncRacerControl, so
+// every place that already re-syncs the agent-4 controls after a
+// mode/strategy switch, reset, or map load keeps this in step too, with no
+// extra call sites to remember. Leaving agent mode 4 also closes the panel,
+// so re-entering it later starts from a clean, closed state rather than
+// reopening whatever was left open.
+const syncColorPanel = (isAgent4) => {
+  colorPanelBtn.hidden = !isAgent4;
+  if (!isAgent4) {
+    colorPanel.hidden = true;
+    colorPanel.textContent = '';
+    return;
+  }
+  colorPanel.textContent = '';
+  for (const racer of game.mapRacers) {
+    const label = document.createElement('label');
+    label.className = 'color-swatch';
+    const span = document.createElement('span');
+    span.textContent = `#${racer.id} ${racer.robotType}`;
+    const input = document.createElement('input');
+    input.type = 'color';
+    input.value = game.getAgent4RacerColorHex(racer.id);
+    input.dataset.racerId = String(racer.id);
+    label.append(span, input);
+    colorPanel.appendChild(label);
+  }
+};
+
+colorPanelBtn.addEventListener('click', () => {
+  colorPanel.hidden = !colorPanel.hidden;
+});
+
+colorPanel.addEventListener('input', (e) => {
+  const input = e.target;
+  if (input.tagName !== 'INPUT' || input.type !== 'color') return;
+  game.setAgent4RacerColor(Number(input.dataset.racerId), input.value);
+});
+
 syncRacerControl();
 
 gametypeBtn.addEventListener('click', () => {

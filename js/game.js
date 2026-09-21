@@ -88,6 +88,13 @@ export class Game {
     this.agent4MapSize = 8;
     this.agent4Seed = -1;
     this.agent4LastSeed = null;
+    // Each racer's fixed body color, by id - populated lazily (see
+    // _agent4ColorFor) with a stable default the first time a given id is
+    // ever seen, and overridable per-racer via setAgent4RacerColor. Lives
+    // here (not in _setupMapMode) so it survives resets/regenerations
+    // instead of being recomputed - a racer keeps its color even if the
+    // task count or map changes the total racer count around it.
+    this.agent4RacerColors = [];
     this.mapStrategy = 'path';
     this._cameraManualUntil = 0;
 
@@ -168,12 +175,42 @@ export class Game {
     return this.agent4Seed;
   }
 
+  // A racer id's body color, materializing (and remembering) a stable
+  // default the first time this id is ever asked for - a golden-ratio hue
+  // step keyed only on `i`, not racerCount, so an id's default never shifts
+  // just because the task count changed the total around it. Once set
+  // (default or user-picked via setAgent4RacerColor), an id's color is
+  // fixed for the rest of the session.
+  _agent4ColorFor(i) {
+    if (!Number.isFinite(this.agent4RacerColors[i])) {
+      this.agent4RacerColors[i] = new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.65, 0.55).getHex();
+    }
+    return this.agent4RacerColors[i];
+  }
+
+  getAgent4RacerColorHex(id) {
+    return `#${this._agent4ColorFor(id).toString(16).padStart(6, '0')}`;
+  }
+
+  // Fixes racer `id`'s body color to `hex` (a number or a "#rrggbb"
+  // string), persisting it (see agent4RacerColors above) and, if that
+  // racer currently exists, repainting it immediately without needing a
+  // full reset.
+  setAgent4RacerColor(id, hex) {
+    const n = typeof hex === 'string' ? parseInt(hex.replace('#', ''), 16) : hex;
+    if (!Number.isFinite(n)) return;
+    this.agent4RacerColors[id] = n;
+    const racer = this.mapRacers?.find((r) => r.id === id);
+    if (racer) this._setSolidColor(racer.shape.group, n);
+  }
+
   // Saves the current agent-mode-4 map as two downloaded files: a small
-  // JSON recipe (map size, task count, and the EXACT seed this run used -
+  // JSON recipe (map size, task count, the EXACT seed this run used -
   // agent4LastSeed, not agent4Seed, so a "-1 = random" run is still saved
-  // reproducibly) that loadAgent4MapConfig can turn back into the identical
-  // map/spawn/routing, and a PNG snapshot of the map's STARTING layout
-  // (walls/goals/cargo plus every racer's initial position and type, from
+  // reproducibly - and every current racer's fixed body color) that
+  // loadAgent4MapConfig can turn back into the identical map/spawn/routing/
+  // colors, and a PNG snapshot of the map's STARTING layout (walls/goals/
+  // cargo plus every racer's initial position and type, from
   // agent4InitialSnapshot) for a quick visual reference - not wherever
   // everyone has moved to since. Only meaningful in agent4 mode.
   saveAgent4Map() {
@@ -181,10 +218,11 @@ export class Game {
     const stamp = `${this.agent4MapSize}x${this.agent4MapSize}-t${this.agent4TaskCount}-seed${this.agent4LastSeed}`;
     const config = {
       kind: 'hexrun-agent4-map',
-      version: 1,
+      version: 2,
       mapSize: this.agent4MapSize,
       taskCount: this.agent4TaskCount,
       seed: this.agent4LastSeed,
+      racerColors: this.mapRacers.map((r) => this.getAgent4RacerColorHex(r.id)),
     };
     this._downloadText(`hexrun-agent4-map-${stamp}.json`, JSON.stringify(config, null, 2), 'application/json');
     const canvas = this._agent4RenderMapCanvas();
@@ -195,6 +233,10 @@ export class Game {
   // switching into agent mode 4 first if the game isn't already there, then
   // regenerating so the loaded map/spawn/routing exactly reproduce the
   // saved one (same seed, size, and task count in -> same everything out).
+  // A file saved before racerColors existed (version 1) simply has no such
+  // field - agent4RacerColors is left as whatever it already was, so
+  // loading an old map falls back to each id's already-fixed or default
+  // color instead of losing the current palette.
   loadAgent4MapConfig(raw) {
     const cfg = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!cfg || cfg.kind !== 'hexrun-agent4-map') {
@@ -204,6 +246,9 @@ export class Game {
     this.agent4TaskCount = Math.max(1, Math.min(4, Math.round(cfg.taskCount) || 1));
     const seed = Math.round(cfg.seed);
     this.agent4Seed = Number.isFinite(seed) ? seed : -1;
+    if (Array.isArray(cfg.racerColors)) {
+      this.agent4RacerColors = cfg.racerColors.map((s) => parseInt(String(s).replace('#', ''), 16));
+    }
     if (this.gameType !== 'map') this.switchGameType('map');
     if (this.mapStrategy !== 'agent4') {
       let s = this.mapStrategy;
@@ -1215,12 +1260,14 @@ export class Game {
       }
       const robotType = isAgent4 ? agent4RobotTypes[i] : null;
       if (isAgent4) {
-        // Every racer's body (all 26 faces) gets one flat, solid color, spread
-        // evenly around the hue wheel so all racerCount bodies stay visibly
-        // distinct even well past RACER_COLORS's own length - the type-A/B
-        // triangle tint below is layered on top of this, not instead of it.
-        const bodyHue = (i / this.racerCount) % 1;
-        this._setSolidColor(group, new THREE.Color().setHSL(bodyHue, 0.65, 0.55).getHex());
+        // Every racer's body (all 26 faces) gets one flat, solid color - a
+        // fixed, per-id color (default or user-picked, see
+        // agent4RacerColors/_agent4ColorFor), not recomputed from the
+        // current racerCount, so an id's color stays put across resets even
+        // as the task count changes how many racers there are in total. The
+        // type-A/B triangle tint below is layered on top of this, not
+        // instead of it.
+        this._setSolidColor(group, this._agent4ColorFor(i));
         this._setTriangleColor(group, robotType === 'A' ? 0xffffff : 0x111111);
       }
       const start = starts[i];

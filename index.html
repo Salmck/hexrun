@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>翻滚多面体 · 障碍模拟</title>
-  <link rel="stylesheet" href="style.css?v=5" />
+  <link rel="stylesheet" href="style.css?v=6" />
   <script type="importmap">
     {
       "imports": {
@@ -33,6 +33,7 @@
       <button id="btn-reset" type="button">重置</button>
       <button id="btn-save-map" type="button" hidden>保存地图</button>
       <button id="btn-open-map" type="button" hidden>打开地图</button>
+      <button id="btn-color-panel" type="button" hidden>颜色设置</button>
       <input id="open-map-file" type="file" accept="application/json" hidden style="display:none" />
       <!-- Only unhidden in agent mode 4 (see main.js syncRacerControl), where
            there are enough controls to need a deliberate second row - every
@@ -60,8 +61,13 @@
         </select>
       </label>
     </div>
+
+    <!-- Only unhidden in agent mode 4 (see main.js syncRacerControl), toggled
+         open/closed independently by btn-color-panel. Populated dynamically
+         (one swatch per current racer) by main.js's syncColorPanel. -->
+    <div id="agent4-color-panel" hidden></div>
   </div>
 
-  <script type="module" src="js/main.js?v=121"></script>
+  <script type="module" src="js/main.js?v=122"></script>
 </body>
 </html>
