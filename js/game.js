@@ -3,7 +3,7 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
-import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=86';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=87';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=16';
 import { compareSetupState, compareChooseMove } from './compare.js?v=2';
@@ -253,6 +253,87 @@ export class Game {
     return this.compareObstacleProbability;
   }
 
+  // Builds this round's trace frame (see compareTrace/_setupMapMode) and
+  // appends it - `before` is the {positions, sensed} snapshot _tick took
+  // right before this round's decisions ran, so a racer's movingDir is just
+  // "did bx/by change, and by how much", with dx/dy reported directly
+  // rather than guessing a compass label onto the game's own grid axes.
+  // newlyExplored is the diff against the sensed-cells snapshot, since
+  // agent2Sensed only ever grows - recording the whole set every round
+  // would mean re-saving almost the same (and, late in a run, very large)
+  // list over and over.
+  _compareRecordTraceFrame(before) {
+    const newlyExplored = [];
+    for (const k of this.agent2Sensed) {
+      if (before.sensed.has(k)) continue;
+      newlyExplored.push(k.split(',').map(Number));
+    }
+    const racers = this.mapRacers.map((r, i) => {
+      const prev = before.positions[i];
+      const dx = r.bx - prev.bx, dy = r.by - prev.by;
+      return {
+        id: r.id,
+        bx: r.bx,
+        by: r.by,
+        status: r.status,
+        movingDir: (dx || dy) ? { dx, dy } : null,
+        // A 'reached' racer's dots are cleared the instant it settles (see
+        // _applyMapMove's arrival handling) even though racer.path itself
+        // is left stale (pointing at wherever it was routing to right
+        // before it landed) - null it here too so this matches what's
+        // actually shown, not the raw field.
+        path: (r.status === 'reached' || !r.path) ? null : r.path.map((c) => [c.fx, c.fy]),
+      };
+    });
+    const yields = this.compareStats.pendingYields;
+    this.compareStats.pendingYields = [];
+    this.compareTrace.push({ round: this.compareStats.tickCount, newlyExplored, racers, yields });
+  }
+
+  // The full per-round recording for saveCompareMap's trace export: static
+  // map/racer info once at the top (walls, goals, each racer's fixed body
+  // and path-dot colors), then compareTrace verbatim - every round's racer
+  // positions/status/intended movement/current A*-dot path, newly explored
+  // (shared-vision) cells, and any yield events, so the whole run can be
+  // reconstructed and inspected frame by frame afterward without needing
+  // the live game state at all.
+  _compareBuildTraceExport() {
+    const { blocksX, blocksY, blockOpen } = this.blockGrid;
+    const walls = [];
+    for (let y = 0; y < blocksY; y++) {
+      for (let x = 0; x < blocksX; x++) {
+        if (!blockOpen(x, y)) walls.push([x, y]);
+      }
+    }
+    return {
+      kind: 'hexrun-compare-trace',
+      version: 1,
+      mapSize: this.compareMapSize,
+      blocksX,
+      blocksY,
+      obstacleProbability: this.compareObstacleProbability,
+      seed: this.compareLastSeed,
+      compareMode: this.compareMode,
+      walls,
+      goals: this.mapGoals.map((g) => [g.bx, g.by]),
+      racers: this.mapRacers.map((r, i) => ({
+        id: r.id,
+        startBx: this.compareInitialSnapshot?.[i]?.bx ?? null,
+        startBy: this.compareInitialSnapshot?.[i]?.by ?? null,
+        bodyColor: this.getAgent4RacerColorHex(r.id),
+        pathColor: this._pathColorHex(i),
+      })),
+      discoveredAtRound: this.compareStats?.discoveredAt ?? null,
+      completedAtRound: this.compareStats?.completedAt ?? null,
+      totalYields: this.compareStats?.yieldCount ?? 0,
+      totalRounds: this.compareStats?.tickCount ?? 0,
+      // Each frame's movingDir is {dx, dy} in grid-cell units (one of
+      // {dx:1,dy:0}/{dx:-1,dy:0}/{dx:0,dy:1}/{dx:0,dy:-1}), not a compass
+      // label - dx is the map's own bx axis, dy its by axis.
+      frames: this.compareTrace || [],
+    };
+  }
+
   // Builds AGENT4_PALETTE_SIZE default colors (golden-ratio hue steps, so
   // they're spread evenly and every index's default is stable on its own,
   // independent of every other slot) and overlays whatever a previous
@@ -292,6 +373,15 @@ export class Game {
 
   getAgent4RacerColorHex(id) {
     return `#${this._agent4ColorFor(id).toString(16).padStart(6, '0')}`;
+  }
+
+  // The A*-path-dots color for racer index `i` - same golden-ratio hue step
+  // used when the dots' own materials are built in _setupMapMode, factored
+  // out so the compare-mode trace export (see saveCompareMap) can report
+  // the exact color the dots are actually drawn in without duplicating the
+  // formula.
+  _pathColorHex(i) {
+    return `#${new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.78, 0.52).getHexString()}`;
   }
 
   // Fixes the palette slot racer `id` maps to (id % palette length) to
@@ -395,6 +485,9 @@ export class Game {
     this._downloadText(`hexrun-compare-map-${stamp}.json`, JSON.stringify(config, null, 2), 'application/json');
     const canvas = this._compareRenderMapCanvas();
     if (canvas) this._downloadDataUrl(`hexrun-compare-map-${stamp}.png`, canvas.toDataURL('image/png'));
+    // Third file: a full frame-by-frame recording of the run so far (empty
+    // if it hasn't been run yet) - see _compareBuildTraceExport/compareTrace.
+    this._downloadText(`hexrun-compare-map-${stamp}-trace.json`, JSON.stringify(this._compareBuildTraceExport(), null, 2), 'application/json');
   }
 
   // Parses and applies a map recipe previously produced by saveCompareMap -
@@ -1242,7 +1335,13 @@ export class Game {
         yieldCount: 0,
         tickCount: 0,
         totalTickMs: 0, // real (wall-clock) cost of every counted round, for totalTickMs/tickCount
+        pendingYields: [], // this round's not-yet-recorded yield events - drained into a frame each tick, see _tick
       };
+      // One entry per counted round (see _tick) - a full record of that
+      // round's decisions, for saveCompareMap's trace export. Naturally
+      // bounded the same way tickCount is: stops growing for good once
+      // compareStats.completedAt is set.
+      this.compareTrace = [];
     }
 
     // Agent mode 2 (and the comparison-experiment mode, which reuses agent2's
@@ -1561,7 +1660,7 @@ export class Game {
         if (isAgent4) this._setTriangleColor(group, robotType === 'A' ? 0xffffff : 0x111111);
       }
       const start = starts[i];
-      const pathColor = new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.78, 0.52);
+      const pathColor = new THREE.Color(this._pathColorHex(i));
       const pathDots = new THREE.InstancedMesh(
         new THREE.CircleGeometry(cellSize * 0.16, 14),
         new THREE.MeshBasicMaterial({ color: pathColor, transparent: true, opacity: 0.96, depthWrite: false }),
@@ -2806,6 +2905,13 @@ export class Game {
         const compareRunning = this.compareStats && this.compareStats.completedAt === null;
         const perfStart = compareRunning ? performance.now() : 0;
         if (compareRunning) this.compareStats.tickCount++;
+        // Snapshotted before this round's decisions run, purely for the
+        // trace export below - lets each racer's movingDir be read off as a
+        // plain "did bx/by change, and which way" diff afterward, with no
+        // need to instrument _applyMapMove itself.
+        const traceBefore = compareRunning
+          ? { positions: this.mapRacers.map((r) => ({ bx: r.bx, by: r.by })), sensed: new Set(this.agent2Sensed) }
+          : null;
         for (const racer of this.mapRacers) {
           if (!racer.shape.isBusy()) {
             if (racer.pendingDir) {
@@ -2824,7 +2930,10 @@ export class Game {
         }
         if (this.mapStrategy === 'agent4') this._updateAgent4Recenter();
         if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
-        if (compareRunning) this.compareStats.totalTickMs += performance.now() - perfStart;
+        if (compareRunning) {
+          this.compareStats.totalTickMs += performance.now() - perfStart;
+          this._compareRecordTraceFrame(traceBefore);
+        }
       }
       this._reportStats();
     }

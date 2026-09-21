@@ -216,7 +216,11 @@ function agent2ChainYield(game, parked) {
   if (gi >= 0) game.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
   // compareStats only exists in compare mode (see Game#_setupMapMode) - a
   // no-op check here means plain agent2 play is completely unaffected.
-  if (game.compareStats) game.compareStats.yieldCount++;
+  // pendingYields is drained into that round's trace frame by Game#_tick.
+  if (game.compareStats) {
+    game.compareStats.yieldCount++;
+    game.compareStats.pendingYields.push({ type: 'chain', chain: chain.map((c) => [c.bx, c.by]) });
+  }
   return true;
 }
 
@@ -237,7 +241,10 @@ function agent2ForceYield(game, parked) {
   parked.path = null;
   parked.status = 'solving';
   game._applyMapMove(parked, dest);
-  if (game.compareStats) game.compareStats.yieldCount++;
+  if (game.compareStats) {
+    game.compareStats.yieldCount++;
+    game.compareStats.pendingYields.push({ type: 'force', racerId: parked.id });
+  }
   return true;
 }
 
