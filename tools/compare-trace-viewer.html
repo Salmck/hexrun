@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>对比试验轨迹回放</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #14181f; color: #ece6df;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  #dropzone {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; border: 2px dashed rgba(255,255,255,0.25); margin: 24px; border-radius: 16px;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+  #dropzone.dragover { border-color: #8ab4f8; background: rgba(138,180,248,0.08); }
+  #dropzone p { margin: 0; color: #b9c4d6; font-size: 14px; }
+  #dropzone .hint { font-size: 12px; color: #7c8598; }
+  #file-input-label {
+    background: #c9b8d8; color: #201a26; font-weight: 600; font-size: 13px;
+    padding: 8px 18px; border-radius: 999px; cursor: pointer;
+  }
+  #file-input { display: none; }
+  #error-msg { color: #f28b82; font-size: 13px; min-height: 18px; }
+
+  #viewer { display: none; flex: 1; min-height: 0; flex-direction: column; }
+  #viewer.active { display: flex; }
+  #main { flex: 1; min-height: 0; display: flex; gap: 16px; padding: 16px; }
+  #canvas-wrap { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; background: #0c0f14; border-radius: 12px; overflow: hidden; }
+  canvas { display: block; image-rendering: pixelated; }
+
+  #sidebar { width: 240px; flex: 0 0 auto; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+  .panel {
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; padding: 10px 12px; font-size: 12px;
+  }
+  .panel h3 { margin: 0 0 8px; font-size: 12px; color: #b9c4d6; font-weight: 600; letter-spacing: 0.02em; }
+  .stat-row { display: flex; justify-content: space-between; gap: 10px; padding: 2px 0; }
+  .stat-row span:last-child { color: #e8b7a0; font-variant-numeric: tabular-nums; }
+  #legend-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .legend-chip { display: flex; align-items: center; gap: 5px; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 3px 7px; font-size: 11px; white-space: nowrap; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; border: 1px solid rgba(255,255,255,0.25); }
+  #yield-log { max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+  #yield-log .empty { color: #7c8598; }
+  .yield-entry { color: #ffd666; }
+
+  #controls {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px 16px;
+    flex-wrap: wrap;
+  }
+  #controls button {
+    appearance: none; border: none; background: #c9b8d8; color: #201a26; font-weight: 600;
+    font-size: 13px; padding: 7px 14px; border-radius: 999px; cursor: pointer;
+  }
+  #controls button:hover { filter: brightness(1.08); }
+  #round-scrub { flex: 1; min-width: 120px; }
+  #round-label { font-variant-numeric: tabular-nums; font-size: 12px; white-space: nowrap; }
+  #speed-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #d8d2c8; white-space: nowrap; }
+  #btn-reload { background: #b9c4d6; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="dropzone">
+    <p>把导出的 <code>*-trace.json</code> 文件拖到这里，或者：</p>
+    <label id="file-input-label" for="file-input">选择文件</label>
+    <input id="file-input" type="file" accept="application/json,.json" />
+    <p class="hint">纯本地处理，文件不会被上传到任何地方 - 参见 docs/compare-trace-format.md</p>
+    <p id="error-msg"></p>
+  </div>
+
+  <div id="viewer">
+    <div id="main">
+      <div id="canvas-wrap"><canvas id="canvas"></canvas></div>
+      <div id="sidebar">
+        <div class="panel">
+          <h3>本次运行</h3>
+          <div class="stat-row"><span>地图</span><span id="info-size">--</span></div>
+          <div class="stat-row"><span>寻路模式</span><span id="info-mode">--</span></div>
+          <div class="stat-row"><span>障碍物概率</span><span id="info-prob">--</span></div>
+          <div class="stat-row"><span>种子</span><span id="info-seed">--</span></div>
+          <div class="stat-row"><span>发现目标轮数</span><span id="info-discovered">--</span></div>
+          <div class="stat-row"><span>发现到完成轮数</span><span id="info-finish">--</span></div>
+          <div class="stat-row"><span>总让位次数</span><span id="info-yields">--</span></div>
+        </div>
+        <div class="panel">
+          <h3>物体（本体色 / 路径点色）</h3>
+          <div id="legend-list"></div>
+        </div>
+        <div class="panel">
+          <h3>当前帧让位事件</h3>
+          <div id="yield-log"><div class="empty">（无）</div></div>
+        </div>
+        <div class="panel">
+          <button id="btn-reload" type="button" style="width:100%">加载另一个文件</button>
+        </div>
+      </div>
+    </div>
+    <div id="controls">
+      <button id="btn-play" type="button">播放</button>
+      <button id="btn-step-back" type="button">◀ 上一帧</button>
+      <button id="btn-step-fwd" type="button">下一帧 ▶</button>
+      <input id="round-scrub" type="range" min="0" max="0" value="0" />
+      <span id="round-label">0 / 0</span>
+      <span id="speed-label">速度<input id="speed" type="range" min="1" max="240" value="40" /></span>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('file-input');
+  const errorMsg = document.getElementById('error-msg');
+  const viewer = document.getElementById('viewer');
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  const legendList = document.getElementById('legend-list');
+  const yieldLog = document.getElementById('yield-log');
+  const roundScrub = document.getElementById('round-scrub');
+  const roundLabel = document.getElementById('round-label');
+  const speedInput = document.getElementById('speed');
+  const btnPlay = document.getElementById('btn-play');
+  const btnStepBack = document.getElementById('btn-step-back');
+  const btnStepFwd = document.getElementById('btn-step-fwd');
+  const btnReload = document.getElementById('btn-reload');
+
+  const infoSize = document.getElementById('info-size');
+  const infoMode = document.getElementById('info-mode');
+  const infoProb = document.getElementById('info-prob');
+  const infoSeed = document.getElementById('info-seed');
+  const infoDiscovered = document.getElementById('info-discovered');
+  const infoFinish = document.getElementById('info-finish');
+  const infoYields = document.getElementById('info-yields');
+
+  let trace = null;
+  let frameIndex = 0;
+  let playing = false;
+  let playTimer = null;
+  let wallSet = null;
+
+  // Mirrors Game#_rleEncodeGrid's format exactly - see
+  // docs/compare-trace-format.md for the full explanation. Returns a plain
+  // array of booleans, index = y*blocksX+x.
+  function decodeMask(runs, blocksX, blocksY) {
+    const total = blocksX * blocksY;
+    const explored = new Array(total).fill(false);
+    let value = false;
+    let i = 0;
+    for (const runLength of runs) {
+      if (value) for (let k = 0; k < runLength && i + k < total; k++) explored[i + k] = true;
+      i += runLength;
+      value = !value;
+    }
+    return explored;
+  }
+
+  function showError(msg) {
+    errorMsg.textContent = msg;
+  }
+
+  function loadFile(file) {
+    if (!file) return;
+    showError('');
+    const reader = new FileReader();
+    reader.onerror = () => showError('文件读取失败：' + reader.error);
+    reader.onload = () => {
+      let parsed;
+      try {
+        parsed = JSON.parse(reader.result);
+      } catch (err) {
+        showError('不是合法的 JSON 文件：' + err.message);
+        return;
+      }
+      if (!parsed || parsed.kind !== 'hexrun-compare-trace') {
+        showError('这不是一个 hexrun 对比试验轨迹文件（kind 不是 hexrun-compare-trace）。');
+        return;
+      }
+      initViewer(parsed);
+    };
+    reader.readAsText(file);
+  }
+
+  function initViewer(data) {
+    trace = data;
+    wallSet = new Set(trace.walls.map(([x, y]) => `${x},${y}`));
+    frameIndex = 0;
+    stopPlayback();
+
+    infoSize.textContent = `${trace.blocksX} x ${trace.blocksY}`;
+    infoMode.textContent = String(trace.compareMode ?? '--').toUpperCase();
+    infoProb.textContent = String(trace.obstacleProbability ?? '--');
+    infoSeed.textContent = String(trace.seed ?? '--');
+    infoDiscovered.textContent = trace.discoveredAtRound ?? '--';
+    infoFinish.textContent = (trace.discoveredAtRound != null && trace.completedAtRound != null)
+      ? String(trace.completedAtRound - trace.discoveredAtRound) : '--';
+    infoYields.textContent = trace.totalYields ?? 0;
+
+    legendList.innerHTML = '';
+    for (const r of trace.racers) {
+      const chip = document.createElement('div');
+      chip.className = 'legend-chip';
+      chip.innerHTML = `<span class="legend-swatch" style="background:${r.bodyColor}"></span>` +
+        `#${r.id}` +
+        `<span class="legend-swatch" style="background:${r.pathColor}"></span>`;
+      legendList.appendChild(chip);
+    }
+
+    const maxFrame = Math.max(0, trace.frames.length - 1);
+    roundScrub.max = String(maxFrame);
+    roundScrub.value = '0';
+
+    const cell = Math.max(4, Math.min(48, Math.floor(720 / Math.max(trace.blocksX, trace.blocksY))));
+    canvas.width = trace.blocksX * cell;
+    canvas.height = trace.blocksY * cell;
+    canvas.dataset.cell = String(cell);
+
+    dropzone.style.display = 'none';
+    viewer.classList.add('active');
+    render();
+  }
+
+  function goalOccupant(frame, gx, gy) {
+    if (!frame) return null;
+    return frame.racers.find((r) => r.status === 'reached' && r.bx === gx && r.by === gy) || null;
+  }
+
+  function racerMeta(id) {
+    return trace.racers.find((r) => r.id === id);
+  }
+
+  function render() {
+    const cell = Number(canvas.dataset.cell);
+    const { blocksX, blocksY } = trace;
+    const frame = trace.frames[frameIndex] || null;
+    const explored = frame ? decodeMask(frame.exploredMask, blocksX, blocksY) : new Array(blocksX * blocksY).fill(false);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let y = 0; y < blocksY; y++) {
+      for (let x = 0; x < blocksX; x++) {
+        const isWall = wallSet.has(`${x},${y}`);
+        ctx.fillStyle = isWall ? '#5b6178' : '#eef1f5';
+        ctx.fillRect(x * cell, y * cell, cell, cell);
+        if (!isWall && !explored[y * blocksX + x]) {
+          ctx.fillStyle = 'rgba(12,15,20,0.55)'; // fog of war - not sensed yet
+          ctx.fillRect(x * cell, y * cell, cell, cell);
+        }
+      }
+    }
+
+    for (const [gx, gy] of trace.goals) {
+      const occ = goalOccupant(frame, gx, gy);
+      ctx.fillStyle = occ ? racerMeta(occ.id).bodyColor : '#35b88a';
+      ctx.beginPath();
+      ctx.arc(gx * cell + cell / 2, gy * cell + cell / 2, cell * 0.32, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (frame) {
+      for (const r of frame.racers) {
+        if (!r.path || r.path.length < 2) continue;
+        const meta = racerMeta(r.id);
+        ctx.fillStyle = meta.pathColor;
+        for (const [px, py] of r.path) {
+          ctx.beginPath();
+          ctx.arc(px * cell + cell / 2, py * cell + cell / 2, cell * 0.12, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      for (const r of frame.racers) {
+        const meta = racerMeta(r.id);
+        ctx.fillStyle = meta.bodyColor;
+        ctx.beginPath();
+        ctx.arc(r.bx * cell + cell / 2, r.by * cell + cell / 2, cell * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = Math.max(1, cell * 0.06);
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+        ctx.stroke();
+      }
+    } else {
+      // Racers snapshot before any recorded frame (e.g. saved before ever
+      // running) - just show everyone at their starting cell.
+      for (const meta of trace.racers) {
+        if (meta.startBx == null) continue;
+        ctx.fillStyle = meta.bodyColor;
+        ctx.beginPath();
+        ctx.arc(meta.startBx * cell + cell / 2, meta.startBy * cell + cell / 2, cell * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    roundLabel.textContent = `${frame ? frame.round : 0} / ${trace.totalRounds}`;
+    roundScrub.value = String(frameIndex);
+
+    yieldLog.innerHTML = '';
+    if (frame && frame.yields && frame.yields.length) {
+      for (const y of frame.yields) {
+        const line = document.createElement('div');
+        line.className = 'yield-entry';
+        line.textContent = y.type === 'chain'
+          ? `连锁让位：${y.chain.map((c) => `(${c[0]},${c[1]})`).join(' → ')}`
+          : `强制让位：#${y.racerId}`;
+        yieldLog.appendChild(line);
+      }
+    } else {
+      yieldLog.innerHTML = '<div class="empty">（无）</div>';
+    }
+  }
+
+  function stopPlayback() {
+    playing = false;
+    btnPlay.textContent = '播放';
+    if (playTimer) { clearInterval(playTimer); playTimer = null; }
+  }
+
+  function startPlayback() {
+    if (!trace.frames.length) return;
+    playing = true;
+    btnPlay.textContent = '暂停';
+    const tick = () => {
+      if (frameIndex >= trace.frames.length - 1) { stopPlayback(); return; }
+      frameIndex++;
+      render();
+    };
+    playTimer = setInterval(tick, Math.max(16, 260 - Number(speedInput.value)));
+  }
+
+  btnPlay.addEventListener('click', () => {
+    if (playing) stopPlayback(); else startPlayback();
+  });
+  btnStepFwd.addEventListener('click', () => {
+    stopPlayback();
+    frameIndex = Math.min(trace.frames.length - 1, frameIndex + 1);
+    render();
+  });
+  btnStepBack.addEventListener('click', () => {
+    stopPlayback();
+    frameIndex = Math.max(0, frameIndex - 1);
+    render();
+  });
+  roundScrub.addEventListener('input', () => {
+    stopPlayback();
+    frameIndex = Number(roundScrub.value);
+    render();
+  });
+  speedInput.addEventListener('change', () => {
+    if (playing) { stopPlayback(); startPlayback(); }
+  });
+  btnReload.addEventListener('click', () => {
+    stopPlayback();
+    trace = null;
+    viewer.classList.remove('active');
+    dropzone.style.display = 'flex';
+    fileInput.value = '';
+  });
+
+  fileInput.addEventListener('change', () => loadFile(fileInput.files && fileInput.files[0]));
+  ['dragover', 'dragenter'].forEach((evt) => dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.add('dragover');
+  }));
+  ['dragleave', 'dragend', 'drop'].forEach((evt) => dropzone.addEventListener(evt, (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+  }));
+  dropzone.addEventListener('drop', (e) => {
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    loadFile(file);
+  });
+})();
+</script>
+</body>
+</html>

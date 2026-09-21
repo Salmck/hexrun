@@ -1,0 +1,160 @@
+# 对比试验轨迹文件（`*-trace.json`）说明
+
+在“对比试验”模式（`mapStrategy === 'compare'`）里点击“保存地图”，会一次性下载三个文件：
+
+| 文件 | 内容 |
+| --- | --- |
+| `hexrun-compare-map-*.json` | 地图配置（边长、种子、寻路模式、颜色板等），可以用“打开地图”重新读回来复现同一张地图 |
+| `hexrun-compare-map-*.png` | 地图初始布局的一张静态截图 |
+| `hexrun-compare-map-*-trace.json` | **本文档要说明的文件**：整场模拟逐轮的完整记录 |
+
+trace 文件是自包含的——不需要配套的配置 JSON 也能看懂整场跑动过程；它由 `js/game.js` 的
+`_compareBuildTraceExport()`（顶层信息）和 `_compareRecordTraceFrame()`（每一轮的
+`frames[]` 条目）生成。如果保存时游戏还没运行过，`frames` 会是空数组。
+
+## 顶层字段
+
+```jsonc
+{
+  "kind": "hexrun-compare-trace",
+  "version": 1,
+  "mapSize": 8,           // 用户设置的地图边长（下限，不是硬上限）
+  "blocksX": 8,           // 实际生成地图的宽度（格数）
+  "blocksY": 8,           // 实际生成地图的高度（格数）
+  "obstacleProbability": 0.32,
+  "seed": 67842181,       // 本次运行实际使用的种子（哪怕面板里填的是 -1）
+  "compareMode": "a",     // 本次运行用的寻路逻辑 a/b/c
+  "walls": [[x, y], ...], // 每一个墙体格子的坐标，全程不变
+  "goals": [[x, y], ...], // 每一个终点格子的坐标，全程不变
+  "racers": [
+    { "id": 0, "startBx": 7, "startBy": 0, "bodyColor": "#ec8b8b", "pathColor": "#f36b6b" },
+    ...
+  ],
+  "discoveredAtRound": 12,   // 第几轮第一次有物体感知到终点；还没发生过就是 null
+  "completedAtRound": 241,   // 第几轮全部物体到达终点；还没发生过就是 null
+  "totalYields": 6,          // 全程"让位"事件总数
+  "totalRounds": 241,        // 全程一共记录了多少轮（一旦全部到达就不再增长）
+  "frames": [ /* 见下 */ ]
+}
+```
+
+- **坐标系**：所有坐标都是 `[x, y]`（对应游戏内部的 `bx`/`by`），`(0,0)` 是地图左上角，
+  `x` 向右增大、`y` 向下增大。
+- **颜色**：`bodyColor` 是物体本体（球体）颜色，`pathColor` 是它 A* 路径圆点的颜色——这
+  两个颜色不一样是有意为之（圆点颜色是按黄金分割色相单独算的，跟本体调色板是两套东
+  西），回放时要分别使用，不能只画一种颜色。
+- **物体数量以 `racers` 数组为准**：任务数量或地图大小变化不会影响这个文件（每次保存都
+  是当次运行的快照）。
+
+## 每一轮的记录（`frames[i]`）
+
+```jsonc
+{
+  "round": 1,                     // 第几轮（从 1 开始，跟 completedAtRound 等字段同一套编号）
+  "exploredMask": [0, 23, 1, 6, ...], // 见下面的“exploredMask 解码”
+  "racers": [
+    {
+      "id": 0,
+      "bx": 6, "by": 0,            // 这一轮结束时的位置
+      "status": "solving",         // "solving" | "reached"
+      "movingDir": { "dx": -1, "dy": 0 }, // 这一轮实际移动的方向；没动就是 null
+      "path": [[5,0],[4,0],[3,0]]  // 当前 A* 路径（跟屏幕上圆点显示的完全一致）；
+                                    // 没有路径，或这一轮已经 reached，就是 null
+    },
+    ...
+  ],
+  "yields": [
+    { "type": "chain", "chain": [[6,3],[6,4]] },  // 连锁让位：占用格子依次滑动的完整链条
+    { "type": "force", "racerId": 3 }             // 强制让位：被直接挤开的那个物体
+  ]
+}
+```
+
+要点：
+
+- **`round` 是"每一帧动画"的编号，不是"每一次决策"**——游戏本身按 60fps 驱动，大多数帧里
+  物体还在上一步的翻滚动画中，`movingDir` 会是 `null`；只有真正迈出新一步的那一帧才有
+  值。回放时如果只想看"关键帧"，可以过滤掉 `movingDir` 全为 `null` 且没有 `path` 变化的帧，
+  但完整回放建议还是逐帧播放，因为这样物体的滚动才是连贯的。
+- **一轮之后，一旦全部物体 `status` 都变成 `"reached"`，`frames` 就不再增长**（`round` 数
+  等于 `completedAtRound`/`totalRounds`），之后哪怕游戏还在运行（比如动画还在收尾），也不
+  会再多记一帧。
+- **`path` 为 `null` 的两种情况**要分开理解：要么这个物体还没找到已知的终点、正在探索
+  （此时它仍是 `"solving"`），要么它已经 `"reached"`（此时哪怕内部还残留着走到一半的路径
+  数据，也统一按"没有路径"处理，因为屏幕上此时圆点确实是消失的）。
+- **`yields` 通常是空数组**，只有真正发生"连锁让位"或"强制让位"的那一帧才非空。
+
+## `exploredMask` 解码
+
+`agent2Sensed`（对比试验共用 agent2 的"共享视野"）是一个只会变大的集合，逐轮完整存一遍
+坐标列表会很浪费——所以这里存的是**行程编码（RLE）**：把整张地图按行展开成一串
+"已探索/未探索"的布尔值，再压缩成"连续同值的长度"数组。
+
+- 展开顺序：`index = y * blocksX + x`，即先按行、每行从左到右。
+- 编码规则：数组里的数字交替代表"连续多少格是 false（未探索）"和"连续多少格是 true
+  （已探索）"，**永远从 false 开始计数**（哪怕第一格就是 true，也会先放一个 `0`）。
+
+解码算法（伪代码，语言无关）：
+
+```js
+function decodeMask(runs, blocksX, blocksY) {
+  const total = blocksX * blocksY;
+  const explored = new Array(total).fill(false);
+  let value = false;
+  let i = 0;
+  for (const runLength of runs) {
+    if (value) {
+      for (let k = 0; k < runLength; k++) explored[i + k] = true;
+    }
+    i += runLength;
+    value = !value;
+  }
+  // explored[y * blocksX + x] 就是 (x, y) 这一轮是否已被探索
+  return explored;
+}
+```
+
+例子：`blocksX = 4`，两行 `[F,F,F,T]` `[T,F,T,T]` 展开后是 `F,F,F,T,T,F,T,T`，
+编码为 `[3, 2, 1, 2]`（3 个 false，2 个 true，1 个 false，2 个 true）。
+
+> 有一个容易疑惑的小细节：解码出来的"已探索"格子数量，会比游戏内部 `agent2Sensed`
+> 集合的元素个数少一些。差的那部分是 `agent2Sense` 顺手标记的、地图边缘物体的
+> "格子外邻居"（比如站在 `(0,0)` 会顺带标记 `(-1,0)`）——这些格子根本不在地图范围内，
+> 屏幕上从来没有、也不可能显示它们，所以 `exploredMask` 只编码地图内的真实格子，
+> 是有意如此，不是漏数据。
+
+## 怎么用这份数据
+
+最基本的用法：按 `round` 顺序遍历 `frames`，每一帧：
+
+1. 解码 `exploredMask`，得到"哪些格子已探索"的完整状态；
+2. 用 `walls`（静态）画墙体；
+3. 用已探索状态给开放地面加一层"已探索"高亮；
+4. 用 `goals`（静态）画终点——如果这一帧有物体 `status === "reached"` 且坐标等于某个
+   终点，就把那个终点画成该物体的 `bodyColor`，否则画成中性色（游戏里是 `#35b88a`）；
+5. 给每个 `status === "solving"` 且 `path` 非空的物体，用它自己的 `pathColor` 沿 `path`
+   画圆点；
+6. 在每个物体的 `(bx, by)` 位置画一个用 `bodyColor` 填色的圆，代表物体本身；
+7. 如果这一帧 `yields` 非空，可以额外做个提示（比如短暂高亮涉及的格子，或者在时间轴上
+   标一个记号）。
+
+统计类的问题，比如"物体 3 一共走了多少步""哪一轮开始物体们互相让位最频繁"，都可以
+直接对 `frames` 做遍历/聚合，不需要重放画面。
+
+## 做成动态回放
+
+配套写了一个可以直接打开的回放工具：**[`tools/compare-trace-viewer.html`](../tools/compare-trace-viewer.html)**。
+用浏览器直接打开这个文件（不需要起 HTTP 服务，也不需要装任何东西），把导出的
+`*-trace.json` 拖进去或者用文件选择框打开，就能看到：
+
+- 按 `round` 顺序播放的动画（墙体、已探索高亮、终点、A* 路径圆点、物体本身，颜色都
+  跟游戏里保持一致）；
+- 播放/暂停、单帧前进/后退、拖动进度条跳到任意一轮、播放速度调节；
+- 顶部实时显示当前轮数、发现/完成轮数、让位次数等汇总信息；
+- 出现"让位"事件的那一帧会有提示。
+
+如果想自己实现一个回放工具（比如做成网页里嵌入的可视化，而不是本地文件），核心逻辑
+就是上面"怎么用这份数据"那五步，加一个用 `setInterval`/`requestAnimationFrame` 驱动的
+播放循环：维护一个"当前帧下标"，每隔一段时间（或者每一帧）把下标加一并重新绘制，
+到 `frames.length` 就停下来。`tools/compare-trace-viewer.html` 就是照着这个思路写的，
+可以直接读源码参考。
