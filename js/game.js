@@ -39,6 +39,11 @@ const OBSTACLE_COLORS = [0xe8604f, 0xf0a03c, 0xd94f7a];
 const SAFE_START_ROWS = 8;
 const SAFE_FINISH_ROWS = 6;
 const RACER_COLORS = [0xf28b82, 0xfbbc04, 0xffd666, 0x81c995, 0x78d9ec, 0x8ab4f8, 0xc58af9, 0xf07bb5];
+// Agent mode 4's fixed body-color palette (see agent4ColorPalette) - sized
+// well past the largest possible racer count (4 tasks x 5 cells = 20) so
+// every index a real session could ever use has its own slot.
+const AGENT4_PALETTE_SIZE = 30;
+const AGENT4_PALETTE_STORAGE_KEY = 'hexrun-agent4-palette';
 
 // Each maze room/passage is expanded into MAZE_RATIO x MAZE_RATIO movement
 // cells, so every corridor is MAZE_RATIO steps wide - at MAZE_RATIO=2 that's
@@ -88,13 +93,16 @@ export class Game {
     this.agent4MapSize = 8;
     this.agent4Seed = -1;
     this.agent4LastSeed = null;
-    // Each racer's fixed body color, by id - populated lazily (see
-    // _agent4ColorFor) with a stable default the first time a given id is
-    // ever seen, and overridable per-racer via setAgent4RacerColor. Lives
-    // here (not in _setupMapMode) so it survives resets/regenerations
-    // instead of being recomputed - a racer keeps its color even if the
-    // task count or map changes the total racer count around it.
-    this.agent4RacerColors = [];
+    // A fixed-length palette of AGENT4_PALETTE_SIZE colors, shared across
+    // every agent-4 session on this machine - racer id `i` always uses
+    // palette[i % length], so a given index's color never shifts just
+    // because the task count changed the total racer count around it, and
+    // never resets to some freshly-computed default either: it's loaded
+    // once from localStorage here (falling back to stable golden-ratio-hue
+    // defaults the very first time), and every edit (the color panel) or
+    // load (loadAgent4MapConfig) writes straight back to localStorage too -
+    // see _agent4LoadPalette/_agent4SavePalette.
+    this.agent4ColorPalette = this._agent4LoadPalette();
     this.mapStrategy = 'path';
     this._cameraManualUntil = 0;
 
@@ -175,39 +183,66 @@ export class Game {
     return this.agent4Seed;
   }
 
-  // A racer id's body color, materializing (and remembering) a stable
-  // default the first time this id is ever asked for - a golden-ratio hue
-  // step keyed only on `i`, not racerCount, so an id's default never shifts
-  // just because the task count changed the total around it. Once set
-  // (default or user-picked via setAgent4RacerColor), an id's color is
-  // fixed for the rest of the session.
+  // Builds AGENT4_PALETTE_SIZE default colors (golden-ratio hue steps, so
+  // they're spread evenly and every index's default is stable on its own,
+  // independent of every other slot) and overlays whatever a previous
+  // session already saved to localStorage on top - a stored value is kept
+  // even if it came from a differently-sized palette (only the specific
+  // indices it actually had are used), and any leftover slots just get
+  // their own default. Malformed/missing storage is silently treated as
+  // "nothing saved yet".
+  _agent4LoadPalette() {
+    const palette = Array.from({ length: AGENT4_PALETTE_SIZE }, (_, i) =>
+      new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.65, 0.55).getHex());
+    try {
+      const raw = localStorage.getItem(AGENT4_PALETTE_STORAGE_KEY);
+      const saved = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(saved)) {
+        saved.forEach((hex, i) => {
+          if (i >= AGENT4_PALETTE_SIZE) return;
+          const n = parseInt(String(hex).replace('#', ''), 16);
+          if (Number.isFinite(n)) palette[i] = n;
+        });
+      }
+    } catch { /* localStorage unavailable or corrupt - defaults stand */ }
+    return palette;
+  }
+
+  _agent4SavePalette() {
+    try {
+      localStorage.setItem(AGENT4_PALETTE_STORAGE_KEY, JSON.stringify(
+        this.agent4ColorPalette.map((n) => `#${n.toString(16).padStart(6, '0')}`)
+      ));
+    } catch { /* localStorage unavailable (private mode, quota, ...) - not fatal */ }
+  }
+
   _agent4ColorFor(i) {
-    if (!Number.isFinite(this.agent4RacerColors[i])) {
-      this.agent4RacerColors[i] = new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.65, 0.55).getHex();
-    }
-    return this.agent4RacerColors[i];
+    return this.agent4ColorPalette[i % this.agent4ColorPalette.length];
   }
 
   getAgent4RacerColorHex(id) {
     return `#${this._agent4ColorFor(id).toString(16).padStart(6, '0')}`;
   }
 
-  // Fixes racer `id`'s body color to `hex` (a number or a "#rrggbb"
-  // string), persisting it (see agent4RacerColors above) and, if that
-  // racer currently exists, repainting it immediately without needing a
-  // full reset.
+  // Fixes the palette slot racer `id` maps to (id % palette length) to
+  // `hex` (a number or a "#rrggbb" string), persists the whole palette to
+  // localStorage, and repaints every CURRENTLY live racer that shares that
+  // slot immediately, without needing a full reset.
   setAgent4RacerColor(id, hex) {
     const n = typeof hex === 'string' ? parseInt(hex.replace('#', ''), 16) : hex;
     if (!Number.isFinite(n)) return;
-    this.agent4RacerColors[id] = n;
-    const racer = this.mapRacers?.find((r) => r.id === id);
-    if (racer) this._setSolidColor(racer.shape.group, n);
+    const slot = id % this.agent4ColorPalette.length;
+    this.agent4ColorPalette[slot] = n;
+    this._agent4SavePalette();
+    for (const racer of this.mapRacers || []) {
+      if (racer.id % this.agent4ColorPalette.length === slot) this._setSolidColor(racer.shape.group, n);
+    }
   }
 
   // Saves the current agent-mode-4 map as two downloaded files: a small
   // JSON recipe (map size, task count, the EXACT seed this run used -
   // agent4LastSeed, not agent4Seed, so a "-1 = random" run is still saved
-  // reproducibly - and every current racer's fixed body color) that
+  // reproducibly - and the full fixed color palette) that
   // loadAgent4MapConfig can turn back into the identical map/spawn/routing/
   // colors, and a PNG snapshot of the map's STARTING layout (walls/goals/
   // cargo plus every racer's initial position and type, from
@@ -218,11 +253,11 @@ export class Game {
     const stamp = `${this.agent4MapSize}x${this.agent4MapSize}-t${this.agent4TaskCount}-seed${this.agent4LastSeed}`;
     const config = {
       kind: 'hexrun-agent4-map',
-      version: 2,
+      version: 3,
       mapSize: this.agent4MapSize,
       taskCount: this.agent4TaskCount,
       seed: this.agent4LastSeed,
-      racerColors: this.mapRacers.map((r) => this.getAgent4RacerColorHex(r.id)),
+      colorPalette: this.agent4ColorPalette.map((n) => `#${n.toString(16).padStart(6, '0')}`),
     };
     this._downloadText(`hexrun-agent4-map-${stamp}.json`, JSON.stringify(config, null, 2), 'application/json');
     const canvas = this._agent4RenderMapCanvas();
@@ -233,10 +268,12 @@ export class Game {
   // switching into agent mode 4 first if the game isn't already there, then
   // regenerating so the loaded map/spawn/routing exactly reproduce the
   // saved one (same seed, size, and task count in -> same everything out).
-  // A file saved before racerColors existed (version 1) simply has no such
-  // field - agent4RacerColors is left as whatever it already was, so
-  // loading an old map falls back to each id's already-fixed or default
-  // color instead of losing the current palette.
+  // A loaded palette (colorPalette, or the older per-racer racerColors from
+  // version 2) is merged into the CURRENT palette slot-by-slot and saved to
+  // localStorage right away, exactly like an edit in the color panel -
+  // loading a map is one of the two things allowed to change the shared
+  // palette (see agent4ColorPalette). A file with neither field (version 1)
+  // leaves the palette untouched.
   loadAgent4MapConfig(raw) {
     const cfg = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!cfg || cfg.kind !== 'hexrun-agent4-map') {
@@ -246,8 +283,14 @@ export class Game {
     this.agent4TaskCount = Math.max(1, Math.min(4, Math.round(cfg.taskCount) || 1));
     const seed = Math.round(cfg.seed);
     this.agent4Seed = Number.isFinite(seed) ? seed : -1;
-    if (Array.isArray(cfg.racerColors)) {
-      this.agent4RacerColors = cfg.racerColors.map((s) => parseInt(String(s).replace('#', ''), 16));
+    const loadedColors = Array.isArray(cfg.colorPalette) ? cfg.colorPalette : cfg.racerColors;
+    if (Array.isArray(loadedColors)) {
+      loadedColors.forEach((s, i) => {
+        if (i >= this.agent4ColorPalette.length) return;
+        const n = parseInt(String(s).replace('#', ''), 16);
+        if (Number.isFinite(n)) this.agent4ColorPalette[i] = n;
+      });
+      this._agent4SavePalette();
     }
     if (this.gameType !== 'map') this.switchGameType('map');
     if (this.mapStrategy !== 'agent4') {

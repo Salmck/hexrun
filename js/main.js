@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=120';
+import { Game } from './game.js?v=121';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -79,9 +79,10 @@ const syncRacerControl = () => {
 };
 
 // Rebuilds the color panel to match the CURRENT racer set (one swatch per
-// racer, labeled by id and robot type) - called from syncRacerControl, so
-// every place that already re-syncs the agent-4 controls after a
-// mode/strategy switch, reset, or map load keeps this in step too, with no
+// racer, labeled by index only - the palette is keyed by index, not robot
+// type) - called from syncRacerControl, so every place that already
+// re-syncs the agent-4 controls after a mode/strategy switch, reset, map
+// load, or task-count/map-size/seed change keeps this in step too, with no
 // extra call sites to remember. Leaving agent mode 4 also closes the panel,
 // so re-entering it later starts from a clean, closed state rather than
 // reopening whatever was left open.
@@ -97,7 +98,7 @@ const syncColorPanel = (isAgent4) => {
     const label = document.createElement('label');
     label.className = 'color-swatch';
     const span = document.createElement('span');
-    span.textContent = `#${racer.id} ${racer.robotType}`;
+    span.textContent = `#${racer.id}`;
     const input = document.createElement('input');
     input.type = 'color';
     input.value = game.getAgent4RacerColorHex(racer.id);
@@ -143,6 +144,7 @@ resetBtn.addEventListener('click', () => {
   // "review the new map before starting it" behavior those settings exist for.
   const isAgent4 = game.gameType === 'map' && game.mapStrategy === 'agent4';
   if (!isAgent4 && !game.running) game.toggle();
+  syncColorPanel(isAgent4); // a reset can reroll a random seed into a different racer count
   syncToggleButton();
 });
 
@@ -157,6 +159,7 @@ const applyRacerCount = () => {
     ? game.setAgent4TaskCount(Number(racerCountSelect.value))
     : game.setRacerCount(Number(racerCountSelect.value));
   racerCountSelect.value = String(count);
+  syncColorPanel(isAgent4); // racer count/set just changed - the panel's rows need to match
   syncToggleButton();
 };
 racerCountSelect.addEventListener('input', applyRacerCount);
@@ -172,6 +175,7 @@ const applyAgent4MapSize = () => {
   if (agent4MapSizeInput.value === '') return;
   const size = game.setAgent4MapSize(Number(agent4MapSizeInput.value));
   agent4MapSizeInput.value = String(size);
+  syncColorPanel(true); // regenerated the map - racer count may have changed
   syncToggleButton();
 };
 agent4MapSizeInput.addEventListener('change', applyAgent4MapSize);
@@ -180,6 +184,7 @@ const applyAgent4Seed = () => {
   if (agent4SeedInput.value === '') return;
   const seed = game.setAgent4Seed(Number(agent4SeedInput.value));
   agent4SeedInput.value = String(seed);
+  syncColorPanel(true); // regenerated the map - racer count may have changed
   syncToggleButton();
 };
 agent4SeedInput.addEventListener('change', applyAgent4Seed);
