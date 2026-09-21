@@ -151,7 +151,8 @@ html, body {
 #speed-label,
 #racer-label,
 #agent4-mapsize-label,
-#agent4-seed-label {
+#agent4-seed-label,
+#compare-mode-label {
   font-size: 12px;
   color: #d8d2c8;
   display: flex;
@@ -165,7 +166,8 @@ html, body {
 #speed-label select,
 #racer-label input,
 #agent4-mapsize-label input,
-#agent4-seed-label input {
+#agent4-seed-label input,
+#compare-mode-label select {
   background: rgba(0, 0, 0, 0.3);
   color: #ece6df;
   border: 1px solid rgba(255, 255, 255, 0.15);

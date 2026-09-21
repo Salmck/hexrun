@@ -66,14 +66,17 @@ const MAX_MAP_SIZE = 61;
 
 // generateObstacleGrid's default "at least 14 separate obstacle components"
 // requirement is tuned for the game's normal ~21-cell maps - a small custom
-// agent4 map can never reach 14 components at all (there just aren't enough
-// cells), so every call here scales that requirement down to the actual
-// generated size instead of relying on the default. Verified empirically
-// down to a 6x6 grid (still succeeds reliably scaled this way) - the real
-// lower bound on map size ends up being how big a single goal line needs
-// (see neededMapSize), not this.
+// map (agent4's own configurable size, or compare mode's - see
+// game.js#_setupMapMode) can never reach 14 components at all (there just
+// aren't enough cells), so every call against a small canvas scales this
+// requirement down to the actual generated size instead of relying on the
+// default. Verified empirically down to a 6x6 grid (still succeeds reliably
+// scaled this way) - the real lower bound on map size for agent4's OWN maps
+// ends up being how big a single goal line needs (see neededMapSize), not
+// this; exported since compare mode's maps have no such line-size floor and
+// need this scaling directly.
 const REFERENCE_MIN_COMPONENTS = 14;
-function scaledMinComponents(size) {
+export function scaledMinComponents(size) {
   return Math.max(1, Math.round((REFERENCE_MIN_COMPONENTS * size * size) / (REFERENCE_MAP_SIZE * REFERENCE_MAP_SIZE)));
 }
 

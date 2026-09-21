@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=121';
+import { Game } from './game.js?v=122';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -16,6 +16,8 @@ const agent4MapSizeLabel = document.getElementById('agent4-mapsize-label');
 const agent4MapSizeInput = document.getElementById('agent4-mapsize');
 const agent4SeedLabel = document.getElementById('agent4-seed-label');
 const agent4SeedInput = document.getElementById('agent4-seed');
+const compareModeLabel = document.getElementById('compare-mode-label');
+const compareModeSelect = document.getElementById('compare-mode');
 const saveMapBtn = document.getElementById('btn-save-map');
 const openMapBtn = document.getElementById('btn-open-map');
 const openMapFile = document.getElementById('open-map-file');
@@ -46,49 +48,61 @@ toggleBtn.addEventListener('click', () => {
   toggleBtn.textContent = running ? '暂停' : '继续';
 });
 
-// Agent mode 4 starts every freshly (re)generated map paused (see
-// Game#_setupMapMode) - task count/map size/seed are easy to keep tweaking
-// right up until someone's actually ready to watch it run. Anything that
-// can trigger a reset needs to re-sync this button afterward, since
-// game.running may have just changed out from under it.
+// Agent mode 4 and compare mode both start every freshly (re)generated map
+// paused (see Game#_setupMapMode) - their settings (task count/map size/
+// seed/routing choice) are easy to keep tweaking right up until someone's
+// actually ready to watch it run. Anything that can trigger a reset needs
+// to re-sync this button afterward, since game.running may have just
+// changed out from under it.
 const syncToggleButton = () => {
   toggleBtn.textContent = game.running ? '暂停' : '继续';
 };
 
-// Agent mode 4 repurposes the racer-count box into a task-count box (one
-// task = one goal line; the session's actual racer count is derived from
-// however many goals that many lines end up needing - see
-// Game#agent4TaskCount). Every other mode/strategy keeps the box meaning
-// "how many racers", as before.
+// Both agent mode 4 and compare mode share this whole second row of
+// controls (map size, seed, save/open, color panel) - they just read/write
+// different underlying Game fields depending on which one is active (see
+// applyAgent4MapSize/applyAgent4Seed below). Agent mode 4 additionally
+// repurposes the racer-count box into a task-count box (one task = one
+// goal line; the session's actual racer count is derived from however many
+// goals that many lines end up needing - see Game#agent4TaskCount); compare
+// mode keeps it meaning "how many racers", same as every other mode/
+// strategy.
 const syncRacerControl = () => {
   const isAgent4 = game.gameType === 'map' && game.mapStrategy === 'agent4';
+  const isCompare = game.gameType === 'map' && game.mapStrategy === 'compare';
+  const usesMapPanel = isAgent4 || isCompare;
   racerLabelText.textContent = isAgent4 ? '任务数量' : '参赛物体';
   racerCountSelect.max = String(isAgent4 ? 4 : game.getMaxRacers());
   racerCountSelect.value = String(isAgent4 ? game.agent4TaskCount : game.racerCount);
 
-  agent4MapSizeLabel.hidden = !isAgent4;
-  agent4SeedLabel.hidden = !isAgent4;
-  saveMapBtn.hidden = !isAgent4;
-  openMapBtn.hidden = !isAgent4;
-  controlsBreak.hidden = !isAgent4;
+  agent4MapSizeLabel.hidden = !usesMapPanel;
+  agent4SeedLabel.hidden = !usesMapPanel;
+  compareModeLabel.hidden = !isCompare;
+  saveMapBtn.hidden = !usesMapPanel;
+  openMapBtn.hidden = !usesMapPanel;
+  controlsBreak.hidden = !usesMapPanel;
   if (isAgent4) {
     agent4MapSizeInput.value = String(game.agent4MapSize);
     agent4SeedInput.value = String(game.agent4Seed);
+  } else if (isCompare) {
+    agent4MapSizeInput.value = String(game.compareMapSize);
+    agent4SeedInput.value = String(game.compareSeed);
+    compareModeSelect.value = game.compareMode;
   }
-  syncColorPanel(isAgent4);
+  syncColorPanel(usesMapPanel);
 };
 
 // Rebuilds the color panel to match the CURRENT racer set (one swatch per
 // racer, labeled by index only - the palette is keyed by index, not robot
 // type) - called from syncRacerControl, so every place that already
-// re-syncs the agent-4 controls after a mode/strategy switch, reset, map
-// load, or task-count/map-size/seed change keeps this in step too, with no
-// extra call sites to remember. Leaving agent mode 4 also closes the panel,
-// so re-entering it later starts from a clean, closed state rather than
-// reopening whatever was left open.
-const syncColorPanel = (isAgent4) => {
-  colorPanelBtn.hidden = !isAgent4;
-  if (!isAgent4) {
+// re-syncs the agent-4/compare controls after a mode/strategy switch,
+// reset, map load, or task-count/map-size/seed/routing-mode change keeps
+// this in step too, with no extra call sites to remember. Leaving both
+// modes also closes the panel, so re-entering either one later starts from
+// a clean, closed state rather than reopening whatever was left open.
+const syncColorPanel = (usesMapPanel) => {
+  colorPanelBtn.hidden = !usesMapPanel;
+  if (!usesMapPanel) {
     colorPanel.hidden = true;
     colorPanel.textContent = '';
     return;
@@ -128,7 +142,7 @@ gametypeBtn.addEventListener('click', () => {
   syncToggleButton();
 });
 
-const MAP_STRATEGY_LABEL = { path: 'A* 寻路', explore: '自主探索', agent: '智能体模式', agent2: '智能体模式2', agent3: '智能体模式3', agent4: '智能体模式4' };
+const MAP_STRATEGY_LABEL = { path: 'A* 寻路', explore: '自主探索', agent: '智能体模式', agent2: '智能体模式2', agent3: '智能体模式3', agent4: '智能体模式4', compare: '对比试验' };
 mapStrategyBtn.addEventListener('click', () => {
   const strategy = game.toggleMapStrategy();
   mapStrategyBtn.textContent = MAP_STRATEGY_LABEL[strategy];
@@ -139,12 +153,13 @@ mapStrategyBtn.addEventListener('click', () => {
 resetBtn.addEventListener('click', () => {
   game.reset();
   // Every other mode always resumes right after a manual reset; agent mode
-  // 4 instead respects whatever game.reset() just decided (always paused -
-  // see Game#_setupMapMode), so pressing 重置 there doesn't fight the
-  // "review the new map before starting it" behavior those settings exist for.
-  const isAgent4 = game.gameType === 'map' && game.mapStrategy === 'agent4';
-  if (!isAgent4 && !game.running) game.toggle();
-  syncColorPanel(isAgent4); // a reset can reroll a random seed into a different racer count
+  // 4 and compare mode instead respect whatever game.reset() just decided
+  // (always paused - see Game#_setupMapMode), so pressing 重置 there
+  // doesn't fight the "review the new map before starting it" behavior
+  // those settings exist for.
+  const usesMapPanel = game.gameType === 'map' && (game.mapStrategy === 'agent4' || game.mapStrategy === 'compare');
+  if (!usesMapPanel && !game.running) game.toggle();
+  syncColorPanel(usesMapPanel); // a reset can reroll a random seed into a different racer count
   syncToggleButton();
 });
 
@@ -155,11 +170,12 @@ speedSelect.addEventListener('change', () => {
 const applyRacerCount = () => {
   if (racerCountSelect.value === '') return;
   const isAgent4 = game.gameType === 'map' && game.mapStrategy === 'agent4';
+  const isCompare = game.gameType === 'map' && game.mapStrategy === 'compare';
   const count = isAgent4
     ? game.setAgent4TaskCount(Number(racerCountSelect.value))
     : game.setRacerCount(Number(racerCountSelect.value));
   racerCountSelect.value = String(count);
-  syncColorPanel(isAgent4); // racer count/set just changed - the panel's rows need to match
+  syncColorPanel(isAgent4 || isCompare); // racer count/set just changed - the panel's rows need to match
   syncToggleButton();
 };
 racerCountSelect.addEventListener('input', applyRacerCount);
@@ -170,10 +186,15 @@ racerCountSelect.addEventListener('change', applyRacerCount);
 // can be several digits long (a seed especially), and regenerating the
 // whole map after every single character typed would mean whatever's on
 // screen when you stop to look almost never matches the value actually
-// sitting in the box.
+// sitting in the box. Both agent mode 4 and compare mode share this same
+// pair of inputs - which underlying setter gets called depends on which
+// one is currently active.
 const applyAgent4MapSize = () => {
   if (agent4MapSizeInput.value === '') return;
-  const size = game.setAgent4MapSize(Number(agent4MapSizeInput.value));
+  const isCompare = game.mapStrategy === 'compare';
+  const size = isCompare
+    ? game.setCompareMapSize(Number(agent4MapSizeInput.value))
+    : game.setAgent4MapSize(Number(agent4MapSizeInput.value));
   agent4MapSizeInput.value = String(size);
   syncColorPanel(true); // regenerated the map - racer count may have changed
   syncToggleButton();
@@ -182,15 +203,24 @@ agent4MapSizeInput.addEventListener('change', applyAgent4MapSize);
 
 const applyAgent4Seed = () => {
   if (agent4SeedInput.value === '') return;
-  const seed = game.setAgent4Seed(Number(agent4SeedInput.value));
+  const isCompare = game.mapStrategy === 'compare';
+  const seed = isCompare
+    ? game.setCompareSeed(Number(agent4SeedInput.value))
+    : game.setAgent4Seed(Number(agent4SeedInput.value));
   agent4SeedInput.value = String(seed);
   syncColorPanel(true); // regenerated the map - racer count may have changed
   syncToggleButton();
 };
 agent4SeedInput.addEventListener('change', applyAgent4Seed);
 
+compareModeSelect.addEventListener('change', () => {
+  compareModeSelect.value = game.setCompareMode(compareModeSelect.value);
+  syncColorPanel(true); // regenerated the map - racer count may have changed
+  syncToggleButton();
+});
+
 saveMapBtn.addEventListener('click', () => {
-  game.saveAgent4Map();
+  game.saveMapConfig();
 });
 
 openMapBtn.addEventListener('click', () => {
@@ -203,14 +233,14 @@ openMapFile.addEventListener('change', async () => {
   if (!file) return;
   try {
     const text = await file.text();
-    game.loadAgent4MapConfig(text);
+    game.loadMapConfig(text);
     gametypeBtn.textContent = game.gameType === 'track' ? '赛道模式' : '地图模式';
     mapStrategyBtn.hidden = game.gameType !== 'map';
     mapStrategyBtn.textContent = MAP_STRATEGY_LABEL[game.mapStrategy];
     syncRacerControl();
-    syncToggleButton(); // loadAgent4MapConfig leaves the game paused - see Game#_setupMapMode
+    syncToggleButton(); // loadMapConfig leaves the game paused - see Game#_setupMapMode
   } catch (err) {
-    console.error('Failed to load agent-4 map file:', err);
+    console.error('Failed to load map file:', err);
     window.alert('地图文件读取失败：' + err.message);
   }
 });

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>翻滚多面体 · 障碍模拟</title>
-  <link rel="stylesheet" href="style.css?v=6" />
+  <link rel="stylesheet" href="style.css?v=7" />
   <script type="importmap">
     {
       "imports": {
@@ -35,15 +35,19 @@
       <button id="btn-open-map" type="button" hidden>打开地图</button>
       <button id="btn-color-panel" type="button" hidden>颜色设置</button>
       <input id="open-map-file" type="file" accept="application/json" hidden style="display:none" />
-      <!-- Only unhidden in agent mode 4 (see main.js syncRacerControl), where
-           there are enough controls to need a deliberate second row - every
-           other mode/strategy keeps flowing everything into one row exactly
-           as before. -->
+      <!-- Only unhidden in agent mode 4 or compare mode (see main.js
+           syncRacerControl), where there are enough controls to need a
+           deliberate second row - every other mode/strategy keeps flowing
+           everything into one row exactly as before. -->
       <div id="controls-break" hidden></div>
       <label id="racer-label">
         <span id="racer-label-text">参赛物体</span>
         <input id="racer-count" type="number" min="1" max="8" step="1" value="4" inputmode="numeric" />
       </label>
+      <!-- Shared between agent mode 4 and compare mode - which underlying
+           field these read/write (agent4MapSize/agent4Seed vs
+           compareMapSize/compareSeed) depends on which one is active; see
+           main.js syncRacerControl/applyAgent4MapSize/applyAgent4Seed. -->
       <label id="agent4-mapsize-label" hidden>
         地图边长
         <input id="agent4-mapsize" type="number" min="4" max="40" step="1" value="8" inputmode="numeric" />
@@ -51,6 +55,14 @@
       <label id="agent4-seed-label" hidden>
         随机因子
         <input id="agent4-seed" type="number" step="1" value="-1" inputmode="numeric" title="-1 表示每次随机" />
+      </label>
+      <label id="compare-mode-label" hidden>
+        寻路模式
+        <select id="compare-mode">
+          <option value="a">A</option>
+          <option value="b">B</option>
+          <option value="c">C</option>
+        </select>
       </label>
       <label id="speed-label">
         速度
@@ -62,12 +74,13 @@
       </label>
     </div>
 
-    <!-- Only unhidden in agent mode 4 (see main.js syncRacerControl), toggled
-         open/closed independently by btn-color-panel. Populated dynamically
-         (one swatch per current racer) by main.js's syncColorPanel. -->
+    <!-- Only unhidden in agent mode 4 or compare mode (see main.js
+         syncRacerControl), toggled open/closed independently by
+         btn-color-panel. Populated dynamically (one swatch per current
+         racer) by main.js's syncColorPanel. -->
     <div id="agent4-color-panel" hidden></div>
   </div>
 
-  <script type="module" src="js/main.js?v=123"></script>
+  <script type="module" src="js/main.js?v=124"></script>
 </body>
 </html>

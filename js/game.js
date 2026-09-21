@@ -3,9 +3,10 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
-import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=84';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=85';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng } from './agent4.js?v=15';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=16';
+import { compareSetupState, compareChooseMove } from './compare.js?v=1';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -93,6 +94,18 @@ export class Game {
     this.agent4MapSize = 8;
     this.agent4Seed = -1;
     this.agent4LastSeed = null;
+    // Comparison-experiment mode ("对比试验") - the map is generated exactly
+    // like agent2's (one scattered goal per racer, session racerCount is the
+    // plain user-set racer count, not derived from tasks/lines), just with
+    // its own configurable size/seed instead of agent2's fixed size and
+    // unseeded Math.random - see _setupMapMode and js/compare.js.
+    // compareMode ('a'/'b'/'c') picks which routing logic every racer uses
+    // this session; all three currently delegate to agent2's own logic
+    // unchanged (see js/compare.js) until they're given distinct ones.
+    this.compareMapSize = 8;
+    this.compareSeed = -1;
+    this.compareLastSeed = null;
+    this.compareMode = 'a';
     // A fixed-length palette of AGENT4_PALETTE_SIZE colors, shared across
     // every agent-4 session on this machine - racer id `i` always uses
     // palette[i % length], so a given index's color never shifts just
@@ -181,6 +194,38 @@ export class Game {
     this.agent4Seed = nextSeed;
     this.reset();
     return this.agent4Seed;
+  }
+
+  setCompareMapSize(size) {
+    const nextSize = Math.max(4, Math.min(40, Math.round(size) || 4));
+    if (nextSize === this.compareMapSize) return this.compareMapSize;
+    this.compareMapSize = nextSize;
+    this.reset();
+    return this.compareMapSize;
+  }
+
+  // -1 means "random every reset"; any other (whole) number pins the exact
+  // seed used from then on, making every subsequent reset reproduce the
+  // identical map/goal layout (see the rng passed into pickScatteredGoals in
+  // _setupMapMode) given the same map size and racer count. Movement itself
+  // isn't seeded - the routing logics reused from agent2 (see compare.js)
+  // still use plain Math.random for their own tie-breaks, same as agent2
+  // does today.
+  setCompareSeed(seed) {
+    const n = Math.round(seed);
+    const nextSeed = Number.isFinite(n) ? Math.max(-1, n) : -1;
+    if (nextSeed === this.compareSeed) return this.compareSeed;
+    this.compareSeed = nextSeed;
+    this.reset();
+    return this.compareSeed;
+  }
+
+  setCompareMode(mode) {
+    const next = ['a', 'b', 'c'].includes(mode) ? mode : 'a';
+    if (next === this.compareMode) return this.compareMode;
+    this.compareMode = next;
+    this.reset();
+    return this.compareMode;
   }
 
   // Builds AGENT4_PALETTE_SIZE default colors (golden-ratio hue steps, so
@@ -301,6 +346,81 @@ export class Game {
     }
   }
 
+  // Saves the current comparison-experiment map the same way saveAgent4Map
+  // does (JSON recipe + PNG snapshot), but under its own kind
+  // (hexrun-compare-map) - deliberately NOT interchangeable with agent4's
+  // hexrun-agent4-map files even though both currently carry a similar
+  // shape, since the two modes' maps/recipes are expected to diverge
+  // (compare has a plain racerCount and a routing-logic choice; agent4 has
+  // task count and goal lines) - see loadMapConfig, which reads a file's
+  // kind to route it to the right loader instead of guessing.
+  saveCompareMap() {
+    if (this.mapStrategy !== 'compare') return;
+    const stamp = `${this.compareMapSize}x${this.compareMapSize}-r${this.racerCount}-seed${this.compareLastSeed}`;
+    const config = {
+      kind: 'hexrun-compare-map',
+      version: 1,
+      mapSize: this.compareMapSize,
+      racerCount: this.racerCount,
+      seed: this.compareLastSeed,
+      compareMode: this.compareMode,
+      colorPalette: this.agent4ColorPalette.map((n) => `#${n.toString(16).padStart(6, '0')}`),
+    };
+    this._downloadText(`hexrun-compare-map-${stamp}.json`, JSON.stringify(config, null, 2), 'application/json');
+    const canvas = this._compareRenderMapCanvas();
+    if (canvas) this._downloadDataUrl(`hexrun-compare-map-${stamp}.png`, canvas.toDataURL('image/png'));
+  }
+
+  // Parses and applies a map recipe previously produced by saveCompareMap -
+  // mirrors loadAgent4MapConfig, but for the comparison-experiment mode's
+  // own file kind (rejects an agent4 file just as loadAgent4MapConfig
+  // rejects a compare one - see loadMapConfig for the shared entry point
+  // that picks the right one automatically from a file's kind).
+  loadCompareMapConfig(raw) {
+    const cfg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!cfg || cfg.kind !== 'hexrun-compare-map') {
+      throw new Error('Not a hexrun comparison-experiment map file');
+    }
+    this.compareMapSize = Math.max(4, Math.min(40, Math.round(cfg.mapSize) || 8));
+    this.racerCount = Math.max(1, Math.min(this.getMaxRacers(), Math.round(cfg.racerCount) || 1));
+    const seed = Math.round(cfg.seed);
+    this.compareSeed = Number.isFinite(seed) ? seed : -1;
+    this.compareMode = ['a', 'b', 'c'].includes(cfg.compareMode) ? cfg.compareMode : 'a';
+    if (Array.isArray(cfg.colorPalette)) {
+      cfg.colorPalette.forEach((s, i) => {
+        if (i >= this.agent4ColorPalette.length) return;
+        const n = parseInt(String(s).replace('#', ''), 16);
+        if (Number.isFinite(n)) this.agent4ColorPalette[i] = n;
+      });
+      this._agent4SavePalette();
+    }
+    if (this.gameType !== 'map') this.switchGameType('map');
+    if (this.mapStrategy !== 'compare') {
+      let s = this.mapStrategy;
+      for (let i = 0; i < 8 && s !== 'compare'; i++) s = this.toggleMapStrategy();
+    } else {
+      this.reset();
+    }
+  }
+
+  // Single entry point for "保存地图"/"打开地图" - both agent4 and compare
+  // use the same buttons, so the button handlers don't need to know which
+  // mode is active; they just call these, and the mode currently active (to
+  // save) or the file's own `kind` (to load) picks the right save/load pair
+  // - see saveAgent4Map/loadAgent4MapConfig and saveCompareMap/
+  // loadCompareMapConfig for what "not interchangeable" actually means here.
+  saveMapConfig() {
+    if (this.mapStrategy === 'agent4') return this.saveAgent4Map();
+    if (this.mapStrategy === 'compare') return this.saveCompareMap();
+  }
+
+  loadMapConfig(raw) {
+    const cfg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (cfg?.kind === 'hexrun-agent4-map') return this.loadAgent4MapConfig(cfg);
+    if (cfg?.kind === 'hexrun-compare-map') return this.loadCompareMapConfig(cfg);
+    throw new Error('Not a recognized hexrun map file');
+  }
+
   _downloadText(filename, text, mimeType) {
     this._downloadDataUrl(filename, `data:${mimeType};charset=utf-8,${encodeURIComponent(text)}`);
   }
@@ -371,8 +491,7 @@ export class Game {
     for (const r of snapshot) {
       const cx = ox + r.bx * cell + cell / 2;
       const cy = oy + r.by * cell + cell / 2;
-      const hue = (r.id / snapshot.length) % 1;
-      ctx.fillStyle = `hsl(${Math.round(hue * 360)}, 65%, 55%)`;
+      ctx.fillStyle = this.getAgent4RacerColorHex(r.id);
       ctx.beginPath();
       ctx.arc(cx, cy, cell * 0.4, 0, Math.PI * 2);
       ctx.fill();
@@ -385,24 +504,77 @@ export class Game {
     return canvas;
   }
 
+  // A self-contained top-down schematic of the current comparison-experiment
+  // map - mirrors _agent4RenderMapCanvas above, minus the goal-line/cargo/
+  // platform/robot-type furniture agent4 has and compare doesn't (compare's
+  // goals are agent2-style scattered singles, one per racer, with no groups
+  // or types), and using compareInitialSnapshot for starting positions.
+  _compareRenderMapCanvas() {
+    if (!this.blockGrid || !this.mapGoals) return null;
+    const { blocksX, blocksY, blockOpen } = this.blockGrid;
+    const cell = Math.max(4, Math.min(18, Math.floor(720 / Math.max(blocksX, blocksY))));
+    const pad = 8;
+    const headerH = 28;
+    const canvas = document.createElement('canvas');
+    canvas.width = blocksX * cell + pad * 2;
+    canvas.height = blocksY * cell + pad * 2 + headerH;
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#f4f6fa';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#1c2430';
+    ctx.font = '13px monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(
+      `hexrun 对比试验  size=${this.compareMapSize}  racers=${this.racerCount}  mode=${this.compareMode}  seed=${this.compareLastSeed}`,
+      pad, 8
+    );
+
+    const ox = pad, oy = pad + headerH;
+    for (let y = 0; y < blocksY; y++) {
+      for (let x = 0; x < blocksX; x++) {
+        ctx.fillStyle = blockOpen(x, y) ? '#eef1f5' : '#5b6178';
+        ctx.fillRect(ox + x * cell, oy + y * cell, cell, cell);
+      }
+    }
+
+    ctx.fillStyle = '#35b88a';
+    for (const g of this.mapGoals) {
+      ctx.fillRect(ox + g.bx * cell, oy + g.by * cell, cell, cell);
+    }
+
+    const snapshot = this.compareInitialSnapshot || [];
+    for (const r of snapshot) {
+      const cx = ox + r.bx * cell + cell / 2;
+      const cy = oy + r.by * cell + cell / 2;
+      ctx.fillStyle = this.getAgent4RacerColorHex(r.id);
+      ctx.beginPath();
+      ctx.arc(cx, cy, cell * 0.4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    return canvas;
+  }
+
   toggle() {
     this.running = !this.running;
     return this.running;
   }
 
   toggleMapStrategy() {
-    const order = ['path', 'explore', 'agent', 'agent2', 'agent3', 'agent4'];
+    const order = ['path', 'explore', 'agent', 'agent2', 'agent3', 'agent4', 'compare'];
     const previous = this.mapStrategy;
     this.mapStrategy = order[(order.indexOf(this.mapStrategy) + 1) % order.length];
     if (this.gameType === 'map') {
-      // agent2, agent3, and agent4 each build a completely different map
-      // layout from every other strategy's single shared goal AND from each
-      // other (scattered cluster vs. separate cargo-lined goal lines,
-      // currently identical between agent3 and agent4 but tracked
-      // separately since that's expected to diverge) - crossing any of
+      // agent2, agent3, agent4, and compare each build a completely
+      // different map layout from every other strategy's single shared goal
+      // AND from each other (scattered cluster vs. separate cargo-lined goal
+      // lines vs. compare's own sized/seeded scattered cluster - currently
+      // identical to agent2's shape but tracked separately since its size/
+      // seed diverge from agent2's fixed/unseeded ones) - crossing any of
       // those boundaries needs a full regeneration, not just clearing each
       // racer's memory.
-      const mapLayoutClass = (s) => (s === 'agent2' || s === 'agent3' || s === 'agent4') ? s : 'shared';
+      const mapLayoutClass = (s) => (s === 'agent2' || s === 'agent3' || s === 'agent4' || s === 'compare') ? s : 'shared';
       if (mapLayoutClass(previous) !== mapLayoutClass(this.mapStrategy)) {
         this._teardownMapMode();
         this._setupMapMode();
@@ -1000,6 +1172,7 @@ export class Game {
     const isAgent2 = this.mapStrategy === 'agent2';
     const isAgent3 = this.mapStrategy === 'agent3';
     const isAgent4 = this.mapStrategy === 'agent4';
+    const isCompare = this.mapStrategy === 'compare';
     const usesLineMap = isAgent3 || isAgent4; // both build the cargo-lined goal LINE layout
 
     // One seeded RNG per reset, used for everything agent-4-random this run
@@ -1018,14 +1191,24 @@ export class Game {
       this.agent4RecenterQueue = []; // in-flight { racer, path, groupId } jobs, one hop advanced per tick
       this.agent4LockedCells = new Set(); // "x,y" cells a blue recenter shift settled permanently - see _agent4QueueBlueRecenter
     }
+    // Same idea as agent4Rng above, but for the comparison-experiment mode's
+    // own map/goal layout - movement itself still isn't seeded (see
+    // setCompareSeed), only what pickScatteredGoals/generateObstacleGrid
+    // build below.
+    if (isCompare) {
+      this.compareLastSeed = this.compareSeed === -1 ? Math.floor(Math.random() * 2 ** 31) : this.compareSeed;
+      this.compareRng = agent4CreateRng(this.compareLastSeed);
+    }
 
-    // Agent mode 2 gets one goal per racer, scattered across the map (the
-    // obstacle grid already guarantees every open cell is one connected
-    // region, so any goal is reachable from anywhere - no special placement
-    // constraint is needed beyond spreading them out); agent modes 3 and 4
-    // instead carve several separate cargo-lined goal LINES into their own
-    // map; every other strategy keeps the single shared goal nearest the
-    // map centre on the plain generated obstacle field.
+    // Agent mode 2 (and the comparison-experiment mode, which reuses agent2's
+    // own goal-scattering, just with its own map size/seed) gets one goal per
+    // racer, scattered across the map (the obstacle grid already guarantees
+    // every open cell is one connected region, so any goal is reachable from
+    // anywhere - no special placement constraint is needed beyond spreading
+    // them out); agent modes 3 and 4 instead carve several separate
+    // cargo-lined goal LINES into their own map; every other strategy keeps
+    // the single shared goal nearest the map centre on the plain generated
+    // obstacle field.
     let goalCells;
     if (usesLineMap) {
       // agent3 is driven by a target racer count (it partitions that total
@@ -1043,6 +1226,11 @@ export class Game {
       // camera back proportionally so the whole thing stays in view.
       const nominalSize = isAgent3 ? MAP_SIZE : this.agent4MapSize;
       if (this.cameraOrbit) this.cameraOrbit.radius = 190 * (this.blockGrid.blocksX / nominalSize);
+    } else if (isCompare) {
+      this.blockGrid = generateObstacleGrid(this.compareMapSize, this.compareMapSize, this.compareRng, 0.32, scaledMinComponents(this.compareMapSize));
+      goalCells = pickScatteredGoals(this, this.blockGrid.openCells, this.racerCount, this.compareRng);
+      this.mapGoals = goalCells.map((c) => ({ bx: c.fx, by: c.fy }));
+      if (this.cameraOrbit) this.cameraOrbit.radius = 190 * (this.blockGrid.blocksX / this.compareMapSize);
     } else {
       this.blockGrid = generateObstacleGrid(MAP_SIZE, MAP_SIZE, Math.random);
       if (isAgent2) {
@@ -1075,15 +1263,27 @@ export class Game {
     for (let i = 0; i < this.racerCount; i++) {
       let best = null;
       let bestScore = -Infinity;
+      let fallback = null;
+      let fallbackScore = -Infinity;
       for (const cell of openCells) {
         if (goalCells.some((g) => g.fx === cell.fx && g.fy === cell.fy)) continue;
-        if (starts.some((start) => Math.abs(cell.fx - start.fx) + Math.abs(cell.fy - start.fy) <= 1)) continue;
+        if (starts.some((start) => cell.fx === start.fx && cell.fy === start.fy)) continue; // never reuse an exact start cell
         const distances = goalCells.map((g) => Math.abs(cell.fx - g.fx) + Math.abs(cell.fy - g.fy));
         for (const start of starts) distances.push(Math.abs(cell.fx - start.fx) + Math.abs(cell.fy - start.fy));
         const score = Math.min(...distances);
+        if (score > fallbackScore) { fallbackScore = score; fallback = cell; }
+        if (starts.some((start) => Math.abs(cell.fx - start.fx) + Math.abs(cell.fy - start.fy) <= 1)) continue;
         if (score > bestScore) { bestScore = score; best = cell; }
       }
-      starts.push({ fx: best.fx, fy: best.fy });
+      // `best` keeps every start at least 2 cells from any other and from
+      // every goal, same as before; `fallback` (farthest available cell,
+      // spacing preference dropped) only ever gets used on a map too tight
+      // for `racerCount` starts to all keep that spacing - e.g. compare
+      // mode's own (independently configurable, possibly small) map size
+      // combined with a racerCount inherited from a much roomier previous
+      // mode - so this degrades gracefully there instead of crashing.
+      const chosen = best || fallback;
+      starts.push({ fx: chosen.fx, fy: chosen.fy });
     }
 
     // Agent modes 2, 3, and 4's shared exploration state (visited + pooled
@@ -1094,6 +1294,7 @@ export class Game {
     if (isAgent2) agent2SetupState(this, starts);
     if (isAgent3) agent3SetupState(this, starts);
     if (isAgent4) agent4SetupState(this, starts);
+    if (isCompare) compareSetupState(this, starts);
 
     const cellSize = this.forwardStep;
     const blockStep = MAZE_RATIO * cellSize; // world distance between adjacent block centers
@@ -1295,23 +1496,24 @@ export class Game {
         rolling = this.shape;
       } else {
         group = buildMesh(this.rhombi);
-        if (!isAgent4) this._tintShape(group, RACER_COLORS[i % RACER_COLORS.length]);
+        if (!isAgent4 && !isCompare) this._tintShape(group, RACER_COLORS[i % RACER_COLORS.length]);
         this.scene.add(group);
         shadow = this._makeBlobShadow(this.apothem * 1.15);
         this.scene.add(shadow);
         rolling = new RollingShape(this.rhombi, group);
       }
       const robotType = isAgent4 ? agent4RobotTypes[i] : null;
-      if (isAgent4) {
+      if (isAgent4 || isCompare) {
         // Every racer's body (all 26 faces) gets one flat, solid color - a
         // fixed, per-id color (default or user-picked, see
-        // agent4RacerColors/_agent4ColorFor), not recomputed from the
-        // current racerCount, so an id's color stays put across resets even
-        // as the task count changes how many racers there are in total. The
-        // type-A/B triangle tint below is layered on top of this, not
-        // instead of it.
+        // agent4ColorPalette/_agent4ColorFor - shared between agent4 and
+        // compare, since it's keyed purely by index, not by mode), not
+        // recomputed from the current racerCount, so an id's color stays put
+        // across resets even as the racer count changes around it. Agent
+        // mode 4 additionally layers its type-A/B triangle tint on top of
+        // this - compare mode has no robot types, so it's left alone.
         this._setSolidColor(group, this._agent4ColorFor(i));
-        this._setTriangleColor(group, robotType === 'A' ? 0xffffff : 0x111111);
+        if (isAgent4) this._setTriangleColor(group, robotType === 'A' ? 0xffffff : 0x111111);
       }
       const start = starts[i];
       const pathColor = new THREE.Color().setHSL((i * 0.61803398875) % 1, 0.78, 0.52);
@@ -1351,7 +1553,7 @@ export class Game {
         status: 'solving',
         visitCounts: new Map([[`${start.fx},${start.fy}`, 1]]),
         trail: [{ fx: start.fx, fy: start.fy }],
-        assignedGoal: (isAgent2 || isAgent3 || isAgent4) ? null : this.mapGoal,
+        assignedGoal: (isAgent2 || isAgent3 || isAgent4 || isCompare) ? null : this.mapGoal,
         claimedGoal: null,
         robotType,
         pathColor,
@@ -1368,16 +1570,19 @@ export class Game {
     this._camTarget.set(0, this.apothem, 0);
     this.setSpeed(this.speedName || 'normal');
 
-    if (isAgent4) {
+    if (isAgent4 || isCompare) {
       // Snapshotted once here, right after every racer's starting cell and
-      // type are set - saveAgent4Map's image reads this instead of the live
-      // racer positions, so it always shows the map's ORIGINAL layout, not
-      // wherever everyone has since wandered/settled to.
-      this.agent4InitialSnapshot = this.mapRacers.map((r) => ({ bx: r.bx, by: r.by, id: r.id, robotType: r.robotType }));
-      // A freshly (re)generated agent-4 map starts paused - task count, map
-      // size, and seed are all easy to change right up until the moment
-      // someone's actually ready to watch it run, and a auto-running
-      // simulation makes the map/spawn layout harder to inspect first.
+      // type are set - saveAgent4Map/saveCompareMap's image reads this
+      // instead of the live racer positions, so it always shows the map's
+      // ORIGINAL layout, not wherever everyone has since wandered/settled to.
+      const snapshot = this.mapRacers.map((r) => ({ bx: r.bx, by: r.by, id: r.id, robotType: r.robotType }));
+      if (isAgent4) this.agent4InitialSnapshot = snapshot;
+      else this.compareInitialSnapshot = snapshot;
+      // A freshly (re)generated map starts paused in both modes - map
+      // size/seed/task count/routing choice are all easy to change right up
+      // until the moment someone's actually ready to watch it run, and a
+      // auto-running simulation makes the map/spawn layout harder to inspect
+      // first.
       this.running = false;
     }
   }
@@ -1427,13 +1632,15 @@ export class Game {
       next = this._chooseExplorationMove(racer);
     } else if (this.mapStrategy === 'agent') {
       next = this.agentGoalKnown ? this._chooseDiscoveredPathMove(racer) : this._chooseAgentExploreMove(racer);
-    } else if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') {
+    } else if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4' || this.mapStrategy === 'compare') {
       if (this.mapStrategy === 'agent2') next = agent2ChooseMove(this, racer);
       else if (this.mapStrategy === 'agent3') next = agent3ChooseMove(this, racer);
-      else next = agent4ChooseMove(this, racer);
+      else if (this.mapStrategy === 'agent4') next = agent4ChooseMove(this, racer);
+      else next = compareChooseMove(this, racer);
       // Count consecutive rounds this racer couldn't move; a long streak means
       // it's wedged in a jam the yield/chain-yield logic can't rotate out of.
-      // agent2/3/4ChooseMove watch this and break the deadlock with a scatter.
+      // agent2/3/4ChooseMove (and compareChooseMove, which delegates to
+      // agent2's) watch this and break the deadlock with a scatter.
       if (!next) { racer.idleTicks = (racer.idleTicks || 0) + 1; return; }
     } else {
       next = this._choosePathMove(racer);
@@ -1468,15 +1675,19 @@ export class Game {
     racer.shape.startMove(dir);
     racer.pendingDir = dir;
 
-    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') {
+    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4' || this.mapStrategy === 'compare') {
       // Mark the arrived cell as covered ground in the shared record and sense
       // from the new spot (both shared). If it's a goal, the racer has found
-      // one - it stops right there.
-      const visited = this.mapStrategy === 'agent2' ? this.agent2Visited
+      // one - it stops right there. Compare mode delegates wholesale to
+      // agent2's own state/sense (compareSetupState/compareChooseMove both
+      // just call agent2's directly - see compare.js), so it reuses
+      // agent2Visited/agent2Sense here too rather than keeping a separate
+      // (and redundant) copy.
+      const visited = (this.mapStrategy === 'agent2' || this.mapStrategy === 'compare') ? this.agent2Visited
         : this.mapStrategy === 'agent3' ? this.agent3Visited
         : this.agent4Visited;
       visited.add(`${racer.bx},${racer.by}`);
-      if (this.mapStrategy === 'agent2') agent2Sense(this, racer);
+      if (this.mapStrategy === 'agent2' || this.mapStrategy === 'compare') agent2Sense(this, racer);
       else if (this.mapStrategy === 'agent3') agent3Sense(this, racer);
       else agent4Sense(this, racer);
       if (this._isMapGoal(racer.bx, racer.by)) {
@@ -1789,7 +2000,7 @@ export class Game {
 
   _mapCellAvailable(x, y, racer) {
     if (!this.blockGrid.blockOpen(x, y)) return false;
-    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') {
+    if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4' || this.mapStrategy === 'compare') {
       if (this.mapStrategy === 'agent4' && racer.robotType !== 'B' && this._agent4ReservedForB(x, y)) return false;
       // Any cell another racer stands on is taken - including one that has
       // stopped on a goal, which is a permanent obstacle to everyone else.
@@ -2228,7 +2439,7 @@ export class Game {
 
   _updateMapPathDots(racer, path) {
     if (!racer.pathDots) return;
-    const showsDots = this.mapStrategy === 'path' || this.mapStrategy === 'agent' || this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4';
+    const showsDots = this.mapStrategy === 'path' || this.mapStrategy === 'agent' || this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4' || this.mapStrategy === 'compare';
     if (!showsDots || !path || path.length < 2) {
       racer.pathDots.count = 0;
       racer.pathGlow.count = 0;

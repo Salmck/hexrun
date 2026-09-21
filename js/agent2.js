@@ -258,16 +258,21 @@ function countEnclosedGoals(game, goals) {
 // without crossing another). The maze is far larger than the handful of goals,
 // so a valid thin cluster almost always turns up in a few tries; the best-so-far
 // is kept as a fallback in the rare case none is perfect.
-export function pickScatteredGoals(game, openCells, count) {
+//
+// `rng` defaults to Math.random (agent2's own, unseeded behavior, untouched)
+// but accepts any () => [0,1) generator - the comparison-experiment mode
+// passes its own seeded one through here so its goal layout, not just its
+// walls, is reproducible from a saved seed.
+export function pickScatteredGoals(game, openCells, count, rng = Math.random) {
   let best = null, bestEnclosed = Infinity;
   for (let attempt = 0; attempt < 80; attempt++) {
-    const goals = growGoalCluster(openCells, count);
+    const goals = growGoalCluster(openCells, count, rng);
     if (goals.length < count) continue;
     const enclosed = countEnclosedGoals(game, goals);
     if (enclosed === 0) return goals;
     if (enclosed < bestEnclosed) { bestEnclosed = enclosed; best = goals; }
   }
-  return best || growGoalCluster(openCells, count);
+  return best || growGoalCluster(openCells, count, rng);
 }
 
 // N goals clustered together (4-connected) but deliberately NOT a solid blob.
@@ -276,7 +281,7 @@ export function pickScatteredGoals(game, openCells, count) {
 // goals. Keeping every goal with at least one open non-goal neighbour means
 // each is reachable from the open map around the cluster without crossing
 // another goal - so the last racers can always fill even the innermost goal.
-function growGoalCluster(openCells, count) {
+function growGoalCluster(openCells, count, rng = Math.random) {
   const goals = [];
   const goalSet = new Set();
   const openSet = new Set(openCells.map((c) => `${c.fx},${c.fy}`));
@@ -300,7 +305,7 @@ function growGoalCluster(openCells, count) {
     return true;
   };
 
-  const first = openCells[Math.floor(Math.random() * openCells.length)];
+  const first = openCells[Math.floor(rng() * openCells.length)];
   goals.push(first);
   goalSet.add(`${first.fx},${first.fy}`);
 
@@ -331,7 +336,7 @@ function growGoalCluster(openCells, count) {
     }
     if (!pool.length) break;
 
-    const chosen = pool[Math.floor(Math.random() * pool.length)];
+    const chosen = pool[Math.floor(rng() * pool.length)];
     const [fx, fy] = chosen.split(',').map(Number);
     goals.push({ fx, fy });
     goalSet.add(chosen);
