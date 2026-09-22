@@ -46,13 +46,19 @@ export function agent2Sense(game, racer, sensedSet = game.agent2Sensed) {
 // stay put this round. One returned move = one big cell.
 //
 // `sensedSet` defaults to the shared pool (game.agent2Sensed) - agent2's own
-// mode and comparison-experiment modes B/C/D all call this with no third
-// argument and get the original fully-shared-vision behavior untouched.
-// Comparison-experiment mode A passes each racer's own private Set instead
-// (see js/compare.js), so this same routing/chain-yield logic can be reused
-// verbatim for "each racer only knows what it personally sensed" without a
-// second, divergence-prone copy of it.
-export function agent2ChooseMove(game, racer, sensedSet = game.agent2Sensed) {
+// mode and comparison-experiment modes A/C/D all call this with no third
+// argument and get the original fully-shared-vision behavior untouched
+// (mode A instead passes each racer's own private Set once its own vision
+// stays unshared - see js/compare.js).
+//
+// `allowYield` defaults to true (agent2's own mode and every comparison
+// mode but B). Comparison mode B passes false: a racer stopped on a goal
+// NEVER gets nudged or slid aside for one behind it, so if the only path to
+// every reachable goal is permanently blocked by one, that arriving racer
+// just waits there forever - see compareCheckStuckRacers in js/compare.js
+// for how that gets detected and marked rather than spinning the round
+// clock forever.
+export function agent2ChooseMove(game, racer, sensedSet = game.agent2Sensed, allowYield = true) {
   agent2Sense(game, racer, sensedSet);
 
   // Open, unoccupied neighbouring cells it could step onto.
@@ -107,7 +113,7 @@ export function agent2ChooseMove(game, racer, sensedSet = game.agent2Sensed) {
       // racer (and any behind it) along to the nearest empty goal, freeing this
       // cell for the arriver.
       const parked = game.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === next.fx && o.by === next.fy);
-      if (parked && !agent2ChainYield(game, parked) && (racer.idleTicks || 0) >= 3) {
+      if (allowYield && parked && !agent2ChainYield(game, parked) && (racer.idleTicks || 0) >= 3) {
         // Chain-yield couldn't slide it cleanly this round (a link in the chain
         // is mid-animation) and the arriver has already waited a few rounds -
         // so bump the occupant off directly instead of letting the wait build
@@ -115,6 +121,11 @@ export function agent2ChooseMove(game, racer, sensedSet = game.agent2Sensed) {
         // oscillation. The bumped racer re-plans straight back onto a free goal.
         agent2ForceYield(game, parked);
       }
+      // allowYield === false: `parked` (if any) just sits there - _tryClearWayFor
+      // below can't move it either (a 'reached' racer always fails
+      // _forceVacate's own status check), so this racer waits on this exact
+      // cell forever if nothing else ever frees it. That's the intended
+      // behavior, not a bug - see this function's own doc comment.
       // A racer on a live route NEVER scatters: it keeps its path (and thus its
       // finishing priority) and leans on _tryClearWayFor to shuffle whoever
       // holds the next cell out of the way - force-vacating a chain of solvers

@@ -3,10 +3,10 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
-import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=88';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=89';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=16';
-import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision } from './compare.js?v=5';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=6';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -108,9 +108,10 @@ export class Game {
     // unseeded Math.random - see _setupMapMode and js/compare.js.
     // compareMode ('a'/'b'/'c'/'d') picks which routing logic every racer
     // uses this session - see js/compare.js for what each one actually does
-    // (A withholds shared vision until a goal is reached; B/C/D are agent2's
-    // own fully-shared-vision logic, D being the untouched baseline A is
-    // compared against).
+    // (A withholds shared vision until a goal is reached; B disables the
+    // endgame yield mechanism entirely, so a permanently blocked racer never
+    // finishes; C/D are agent2's own fully-shared-vision, yield-enabled
+    // logic, D being the untouched baseline A and B are compared against).
     this.compareMapSize = 8;
     this.compareSeed = -1;
     this.compareLastSeed = null;
@@ -273,7 +274,7 @@ export class Game {
   // plain [x,y] pairs, or null if it has none worth drawing - see the call
   // site's comment for why this can't just be a fixed slice(1)/slice(N).
   _compareRemainingPath(r) {
-    if (r.status === 'reached' || !r.path || r.path.length < 2) return null;
+    if (r.status === 'reached' || r.compareStuck || !r.path || r.path.length < 2) return null;
     let idx = r.path.findIndex((c) => c.fx === r.bx && c.fy === r.by);
     if (idx === -1) idx = 0;
     const remaining = r.path.slice(idx + 1);
@@ -290,7 +291,13 @@ export class Game {
         id: r.id,
         bx: r.bx,
         by: r.by,
-        status: r.status,
+        // 'stuck' is synthetic - a live racer object only ever has status
+        // 'solving' or 'reached' (see compareCheckStuckRacers, which sets the
+        // separate compareStuck flag instead of touching status itself, since
+        // plenty of other code keys off status being only those two values).
+        // Exported here as a third status so a stuck racer reads unambiguously
+        // rather than looking like it's still actively searching.
+        status: r.compareStuck ? 'stuck' : r.status,
         movingDir: (dx || dy) ? { dx, dy } : null,
         // A 'reached' racer's dots are cleared the instant it settles (see
         // _applyMapMove's arrival handling) even though racer.path itself is
@@ -379,11 +386,19 @@ export class Game {
       completedAtRound: this.compareStats?.completedAt ?? null,
       totalYields: this.compareStats?.yieldCount ?? 0,
       totalRounds: this.compareStats?.tickCount ?? 0,
+      // Only ever non-empty in mode B (no yielding) - the ids of racers that
+      // got permanently stuck behind a goal nobody would vacate rather than
+      // ever settling on one themselves. completedAtRound still fires once
+      // every OTHER racer has reached and these are marked, so a mode B run
+      // that can't fully finish still settles instead of running forever.
+      unreachableRacerIds: this.compareStats?.stuckRacerIds ?? [],
       // Documented here (not just in code comments) since this file is
-      // meant to stand on its own: each frame's movingDir is {dx, dy} in
-      // grid-cell units (one of {dx:1,dy:0}/{dx:-1,dy:0}/{dx:0,dy:1}/
-      // {dx:0,dy:-1}), not a compass label - dx is the map's own bx axis,
-      // dy its by axis. Each frame's exploredMask is that round's FULL
+      // meant to stand on its own: each frame's racer status is "solving",
+      // "reached", or (mode B only) "stuck" - permanently unable to reach a
+      // goal, see unreachableRacerIds above. Each frame's movingDir is
+      // {dx, dy} in grid-cell units (one of {dx:1,dy:0}/{dx:-1,dy:0}/
+      // {dx:0,dy:1}/{dx:0,dy:-1}), not a compass label - dx is the map's own
+      // bx axis, dy its by axis. Each frame's exploredMask is that round's FULL
       // shared-vision state (every one of blocksX*blocksY cells, row-major,
       // index = y*blocksX+x), run-length-encoded as alternating
       // [falseRunLength, trueRunLength, falseRunLength, ...] (the first run
@@ -1396,11 +1411,12 @@ export class Game {
       // forever.
       this.compareStats = {
         discoveredAt: null, // tickCount's value the round a goal was first sensed
-        completedAt: null, // tickCount's value the round every racer settled
+        completedAt: null, // tickCount's value the round every racer settled OR got marked stuck
         yieldCount: 0,
         tickCount: 0,
         totalTickMs: 0, // real (wall-clock) cost of every counted round, for totalTickMs/tickCount
         pendingYields: [], // this round's not-yet-recorded yield events - drained into a frame each tick, see _tick
+        stuckRacerIds: [], // ids marked permanently unable to reach a goal - see compareCheckStuckRacers (mode B, no yielding)
       };
       // One entry per counted round (see _tick) - a full record of that
       // round's decisions, for saveCompareMap's trace export. Naturally
@@ -3008,6 +3024,11 @@ export class Game {
         if (this.mapStrategy === 'agent4') this._updateAgent4Recenter();
         if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
         if (compareRunning) {
+          // Checked every counted round (not just after an arrival) since a
+          // racer can cross the stuck threshold on any round, arrival or
+          // not - see compareCheckStuckRacers for why this is what makes
+          // mode B's round clock stop even when not everyone ever reaches.
+          compareCheckStuckRacers(this);
           this.compareStats.totalTickMs += performance.now() - perfStart;
           this._compareRecordTraceFrame(tracePositionsBefore);
         }

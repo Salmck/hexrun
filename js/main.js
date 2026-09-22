@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=131';
+import { Game } from './game.js?v=132';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -30,6 +30,7 @@ const compareStatsPanel = document.getElementById('compare-stats-panel');
 const compareStatDiscover = document.getElementById('compare-stat-discover');
 const compareStatFinish = document.getElementById('compare-stat-finish');
 const compareStatYields = document.getElementById('compare-stat-yields');
+const compareStatStuck = document.getElementById('compare-stat-stuck');
 const compareStatSteps = document.getElementById('compare-stat-steps');
 const compareStatTicks = document.getElementById('compare-stat-ticks');
 const compareStatTickMs = document.getElementById('compare-stat-tickms');
@@ -124,6 +125,7 @@ const updateCompareStatsPanel = () => {
   compareStatFinish.textContent = (s.discoveredAt === null || s.completedAt === null)
     ? '--' : String(s.completedAt - s.discoveredAt);
   compareStatYields.textContent = String(s.yieldCount);
+  compareStatStuck.textContent = String(s.stuckRacerIds ? s.stuckRacerIds.length : 0);
   compareStatSteps.textContent = String(game.mapRacers.reduce((sum, r) => sum + r.steps, 0));
   compareStatTicks.textContent = String(s.tickCount);
   compareStatTickMs.textContent = s.tickCount ? `${(s.totalTickMs / s.tickCount).toFixed(3)}ms` : '--';
