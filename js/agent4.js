@@ -317,9 +317,16 @@ export function agent4ChooseMove(game, racer) {
 // anyway, so nearby unvisited cells still get swept up along the way - nothing
 // is skipped, the racer just doesn't dither over which nearby cell to take
 // first.
-function agent4ExploreStep(game, racer, pool) {
-  if (racer.exploreTarget && isFrontierCell(game, racer.exploreTarget.fx, racer.exploreTarget.fy)) {
-    const next = routeToward(game, racer, racer.exploreTarget);
+// `sensedSet`/`treatReachedAsObstacle` default to agent4's own usual
+// behavior (the shared game.agent4Sensed pool, settled racers never treated
+// as obstacles) - agent4ChooseMove itself calls this with no overrides.
+// Comparison-experiment mode reuses this same frontier logic wholesale (see
+// js/compare.js) with its own sensedSet (shared pool, or - mode A pre-unlock
+// - a racer's own private view) and treatReachedAsObstacle (mode B only),
+// rather than keeping a second, divergence-prone copy of it.
+export function agent4ExploreStep(game, racer, pool, sensedSet = game.agent4Sensed, treatReachedAsObstacle = false) {
+  if (racer.exploreTarget && isFrontierCell(game, racer.exploreTarget.fx, racer.exploreTarget.fy, sensedSet)) {
+    const next = routeToward(game, racer, racer.exploreTarget, sensedSet, treatReachedAsObstacle);
     if (next) return next;
   }
   racer.exploreTarget = null;
@@ -329,7 +336,7 @@ function agent4ExploreStep(game, racer, pool) {
       .filter((o) => o !== racer && o.status === 'solving' && o.exploreTarget)
       .map((o) => `${o.exploreTarget.fx},${o.exploreTarget.fy}`)
   );
-  const all = collectFrontierCells(game);
+  const all = collectFrontierCells(game, sensedSet);
   const unclaimed = all.filter((c) => !claimed.has(`${c.fx},${c.fy}`));
   const candidates = unclaimed.length ? unclaimed : all;
 
@@ -339,46 +346,51 @@ function agent4ExploreStep(game, racer, pool) {
     if (d < bestD) { bestD = d; best = c; }
   }
   if (best) {
-    const next = routeToward(game, racer, best);
+    const next = routeToward(game, racer, best, sensedSet, treatReachedAsObstacle);
     if (next) { racer.exploreTarget = best; return next; }
   }
 
   // No known frontier at all (fully explored, or momentarily unreachable) -
   // fall back to the plain avoid-doubling-back walk.
-  return pickTowardUnseen(game, racer, pool);
+  return pickTowardUnseen(game, racer, pool, sensedSet);
 }
 
-function routeToward(game, racer, target) {
-  const sensedOpen = (x, y) => game.agent4Sensed.has(`${x},${y}`) && game.blockGrid.blockOpen(x, y);
+export function routeToward(game, racer, target, sensedSet = game.agent4Sensed, treatReachedAsObstacle = false) {
+  const sensedOpen = (x, y) => {
+    if (!sensedSet.has(`${x},${y}`) || !game.blockGrid.blockOpen(x, y)) return false;
+    if (treatReachedAsObstacle && game.mapRacers.some(
+      (o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y)) return false;
+    return true;
+  };
   const route = findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, target);
   if (!route || route.length < 2) return null;
   const next = route[1];
   return game._mapCellAvailable(next.fx, next.fy, racer) ? next : null;
 }
 
-function isFrontierCell(game, x, y) {
-  if (!game.agent4Sensed.has(`${x},${y}`) || !game.blockGrid.blockOpen(x, y)) return false;
-  return DIRS.some(([dx, dy]) => !game.agent4Sensed.has(`${x + dx},${y + dy}`));
+export function isFrontierCell(game, x, y, sensedSet = game.agent4Sensed) {
+  if (!sensedSet.has(`${x},${y}`) || !game.blockGrid.blockOpen(x, y)) return false;
+  return DIRS.some(([dx, dy]) => !sensedSet.has(`${x + dx},${y + dy}`));
 }
 
-function collectFrontierCells(game) {
+export function collectFrontierCells(game, sensedSet = game.agent4Sensed) {
   const cells = [];
-  for (const key of game.agent4Sensed) {
+  for (const key of sensedSet) {
     const sep = key.indexOf(',');
     const x = Number(key.slice(0, sep)), y = Number(key.slice(sep + 1));
-    if (game.blockGrid.blockOpen(x, y) && isFrontierCell(game, x, y)) cells.push({ fx: x, fy: y });
+    if (game.blockGrid.blockOpen(x, y) && isFrontierCell(game, x, y, sensedSet)) cells.push({ fx: x, fy: y });
   }
   return cells;
 }
 
-function pickTowardUnseen(game, racer, pool) {
+export function pickTowardUnseen(game, racer, pool, sensedSet = game.agent4Sensed) {
   if (racer.previousCell) {
     const notBack = pool.filter((cell) => cell.fx !== racer.previousCell.bx || cell.fy !== racer.previousCell.by);
     if (notBack.length) pool = notBack;
   }
 
   const unseenAround = (cell) => DIRS
-    .filter(([dx, dy]) => !game.agent4Sensed.has(`${cell.fx + dx},${cell.fy + dy}`)).length;
+    .filter(([dx, dy]) => !sensedSet.has(`${cell.fx + dx},${cell.fy + dy}`)).length;
   const most = Math.max(...pool.map(unseenAround));
   pool = pool.filter((cell) => unseenAround(cell) === most);
 

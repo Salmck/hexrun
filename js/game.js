@@ -3,10 +3,10 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
-import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=90';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=91';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
-import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=16';
-import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=8';
+import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=17';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=9';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -304,9 +304,9 @@ export class Game {
         // left stale - null it here too so this matches what's actually
         // shown, not the raw field. For a still-solving racer, racer.path is
         // wherever it was last planned FROM - compare mode's routing
-        // (agent2ChooseMove) fully re-plans it fresh every tick BEFORE
-        // applying that tick's move, so by the time this runs (after the
-        // move), the racer's current cell can sit at path[0] (didn't move
+        // (compareChooseMoveImpl in js/compare.js) fully re-plans it fresh
+        // every tick BEFORE applying that tick's move, so by the time this
+        // runs (after the move), the racer's current cell can sit at path[0] (didn't move
         // this tick) or path[1] (did) depending on timing - there's no fixed
         // offset that's always right. Locate the racer's actual current cell
         // in its own path and drop everything through it, same end result as

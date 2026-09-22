@@ -9,37 +9,56 @@
 // agent2's fixed size and Math.random, so a run here is reproducible the
 // same way agent4's is.
 //
-// What's actually being compared is routing LOGIC: game.compareMode selects
-// one of four "logics" (a/b/c/d, picked in the panel) that every racer in the
-// session uses.
+// Routing is agent4's: frontier-directed exploration (head straight for the
+// nearest actual edge of known territory, racers claiming different
+// frontiers instead of dithering step-by-step over "most unseen neighbour"
+// like agent2 does) plus agent4's "no real progress toward a known target"
+// deadlock breaker, reused directly from js/agent4.js (agent4ExploreStep) so
+// this isn't a second, divergence-prone copy of it. The one thing NOT
+// reused from agent4.js is its goal/target selection, which is built around
+// concepts (robot types, goal LINES, per-line reservations) that don't
+// exist here - compare mode's goals are a flat, ungrouped list, one per
+// racer, exactly like agent2's, so compareChooseMove below keeps that
+// simpler target selection (see agent2ChooseMove's own history for it)
+// while swapping in agent4's exploration for the "don't know where to go
+// yet" case.
 //
-// - C, D delegate to agent2's own routing verbatim, unchanged (fully shared
-//   field of view from the very first tick, yielding enabled) - D exists
-//   specifically as that untouched baseline to compare A against; C is still
-//   the same placeholder seam as D until it gets its own distinct logic.
+// What's actually being compared is routing BEHAVIOR on top of that shared
+// engine: game.compareMode selects one of four variants (a/b/c/d, picked in
+// the panel) that every racer in the session uses.
+//
+// - C, D run the engine unchanged (fully shared field of view from the very
+//   first tick, yielding enabled) - D exists specifically as that untouched
+//   baseline to compare A against; C is still the same placeholder seam as
+//   D until it gets its own distinct logic.
 // - A withholds the shared field of view: each racer only "knows" what it
-//   personally has sensed, so goal-discovery doesn't instantly propagate to
-//   the whole swarm. The moment any racer actually reaches (settles on) a
-//   goal, every racer's private view is folded into one shared pool and
-//   vision behaves exactly like C/D from then on.
+//   personally has sensed (including which frontiers it's found), so
+//   goal-discovery doesn't instantly propagate to the whole swarm. The
+//   moment any racer actually reaches (settles on) a goal, every racer's
+//   private view is folded into one shared pool and vision behaves exactly
+//   like C/D from then on.
 // - B disables the endgame yield mechanism entirely (agent2ChainYield/
 //   agent2ForceYield never run): a racer that settles on a goal stays there
 //   no matter who else wants it. Its routing (treatReachedAsObstacle, passed
-//   to agent2ChooseMove below) treats every settled racer as a real
-//   obstacle, same as a wall, so it still routes AROUND one if a walkable
-//   detour exists - only when every route to every goal it knows of is
-//   truly sealed off does it never finish. compareCheckStuckRacers detects
-//   that exactly (a flood-fill, not a guess) and marks it, so the round
-//   counter still stops instead of running forever waiting on something
-//   that provably can't happen.
-import { agent2SetupState, agent2ChooseMove, agent2Sense } from './agent2.js?v=90';
+//   through to both the known-goal A* below and agent4ExploreStep) treats
+//   every settled racer as a real obstacle, same as a wall, so it still
+//   routes AROUND one if a walkable detour exists (during exploration too,
+//   not just once a goal is known) - only when every route to every goal it
+//   knows of is truly sealed off does it never finish. compareCheckStuckRacers
+//   detects that exactly (a flood-fill, not a guess) and marks it, so the
+//   round counter still stops instead of running forever waiting on
+//   something that provably can't happen.
+import { agent2SetupState, agent2Sense, agent2ChainYield, agent2ForceYield } from './agent2.js?v=91';
+import { agent4ExploreStep } from './agent4.js?v=17';
+import { findPath } from './maze.js?v=26';
 
 const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
 export function compareSetupState(game, starts) {
   agent2SetupState(game, starts);
   // Only meaningful for mode A (see compareChooseMove) - harmlessly unused
-  // by B/C/D, which always pass agent2ChooseMove its default (game.agent2Sensed).
+  // by B/C/D, which always pass compareChooseMoveImpl the shared pool
+  // (game.agent2Sensed) directly.
   game.compareVisionShared = false;
 }
 
@@ -67,11 +86,11 @@ export function compareUnlockSharedVision(game) {
 }
 
 // Game#_applyMapMove senses from a racer's newly-arrived cell right after
-// moving it there (separately from the sensing agent2ChooseMove already does
-// at decision time) - that call needs the same private-until-unlock routing
-// as compareChooseMove, or a racer arriving on a cell (rather than merely
-// deciding to head there) would leak straight into the shared pool even
-// during mode A's private phase.
+// moving it there (separately from the sensing compareChooseMoveImpl already
+// does at decision time) - that call needs the same private-until-unlock
+// routing as compareChooseMove, or a racer arriving on a cell (rather than
+// merely deciding to head there) would leak straight into the shared pool
+// even during mode A's private phase.
 export function compareSense(game, racer) {
   if (game.compareMode !== 'a' || game.compareVisionShared) {
     agent2Sense(game, racer);
@@ -95,15 +114,134 @@ export function compareChooseMove(game, racer) {
   switch (game.compareMode) {
     case 'a': {
       compareUnlockSharedVision(game);
-      if (game.compareVisionShared) return agent2ChooseMove(game, racer);
+      if (game.compareVisionShared) return compareChooseMoveImpl(game, racer, game.agent2Sensed, true, false);
       racer.comparePrivateSensed = racer.comparePrivateSensed || new Set();
-      return agent2ChooseMove(game, racer, { sensedSet: racer.comparePrivateSensed });
+      return compareChooseMoveImpl(game, racer, racer.comparePrivateSensed, true, false);
     }
-    case 'b': return agent2ChooseMove(game, racer, { allowYield: false, treatReachedAsObstacle: true });
-    case 'c': return agent2ChooseMove(game, racer);
+    case 'b': return compareChooseMoveImpl(game, racer, game.agent2Sensed, false, true);
+    case 'c': return compareChooseMoveImpl(game, racer, game.agent2Sensed, true, false);
     case 'd':
-    default: return agent2ChooseMove(game, racer);
+    default: return compareChooseMoveImpl(game, racer, game.agent2Sensed, true, false);
   }
+}
+
+// One decision for one racer, agent4's routing engine adapted for compare
+// mode's flat (ungrouped) goal list - see this file's own top comment for
+// exactly what's reused from js/agent4.js (agent4ExploreStep) versus what's
+// necessarily different (target selection has no robot-type/goal-line
+// concepts to consider here).
+function compareChooseMoveImpl(game, racer, sensedSet, allowYield, treatReachedAsObstacle) {
+  agent2Sense(game, racer, sensedSet);
+
+  const pool = DIRS
+    .map(([dx, dy]) => ({ fx: racer.bx + dx, fy: racer.by + dy }))
+    .filter((cell) => game._mapCellAvailable(cell.fx, cell.fy, racer));
+
+  const adjGoal = pool.find((cell) => game._isMapGoal(cell.fx, cell.fy));
+  if (adjGoal) return adjGoal;
+
+  // Checked first, same as agent4ChooseMove, so a scatter set by the
+  // no-progress breaker below actually gets to run for the several ticks
+  // it's meant to last - otherwise a fresh A* replan immediately re-finds
+  // the exact same jammed route and the flag never gets consumed.
+  if ((racer.scatterSteps || 0) > 0 && pool.length) {
+    racer.scatterSteps -= 1;
+    racer.path = null;
+    game._updateMapPathDots(racer, null);
+    const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
+    const cands = fwd.length ? fwd : pool;
+    return cands[Math.floor(Math.random() * cands.length)];
+  }
+
+  // Only a goal that is both known AND currently free is a usable target -
+  // unlike agent2's own fallback-to-a-taken-goal, this never plans toward
+  // one it can't actually land on; if none of the known ones are free,
+  // exploring is guaranteed to eventually turn one up (goals == racer count
+  // always, so some goal somewhere is free while this racer hasn't reached
+  // one yet).
+  const knownGoals = game.mapGoals.filter((g) => sensedSet.has(`${g.bx},${g.by}`));
+  const isTaken = (g) => game.mapRacers.some(
+    (o) => o !== racer && o.status === 'reached' && o.bx === g.bx && o.by === g.by);
+  const freeKnownGoals = knownGoals.filter((g) => !isTaken(g));
+
+  if (freeKnownGoals.length) {
+    let target = null, bestD = Infinity;
+    for (const g of freeKnownGoals) {
+      const d = Math.abs(g.bx - racer.bx) + Math.abs(g.by - racer.by);
+      if (d < bestD) { bestD = d; target = g; }
+    }
+
+    // Tracks real progress toward `target`, separately from idleTicks (which
+    // only catches a racer that couldn't move AT ALL). A racer wedged in a
+    // tight multi-racer knot can keep successfully taking a step most ticks
+    // - resetting idleTicks every time - while net distance to its own
+    // target never actually improves, shuffling sideways within the same
+    // pocket forever. That never trips the idle-based scatter breaker below,
+    // so it's tracked here instead.
+    const distToTarget = Math.abs(target.bx - racer.bx) + Math.abs(target.by - racer.by);
+    const targetKey = `${target.bx},${target.by}`;
+    if (racer._progressTargetKey === targetKey && distToTarget >= (racer._progressDist ?? Infinity)) {
+      racer.noProgressTicks = (racer.noProgressTicks || 0) + 1;
+    } else {
+      racer.noProgressTicks = 0;
+    }
+    racer._progressTargetKey = targetKey;
+    racer._progressDist = distToTarget;
+    if ((racer.noProgressTicks || 0) > 40) {
+      racer.noProgressTicks = 0;
+      racer.scatterSteps = 5; // one step consumed right here
+      racer.path = null;
+      game._updateMapPathDots(racer, null);
+      const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
+      const cands = fwd.length ? fwd : pool;
+      return cands.length ? cands[Math.floor(Math.random() * cands.length)] : null;
+    }
+
+    // A* plans over this racer's sensed map using WALLS ONLY, UNLESS
+    // treatReachedAsObstacle is set (mode B, no yielding), in which case a
+    // settled racer's cell is excluded from the routable map entirely too,
+    // so the route bends around it (or gives up and falls through to
+    // exploring) instead of planning straight through/at something that
+    // will never move.
+    const sensedOpen = (x, y) => {
+      if (!sensedSet.has(`${x},${y}`) || !game.blockGrid.blockOpen(x, y)) return false;
+      if (treatReachedAsObstacle && game.mapRacers.some(
+        (o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y)) return false;
+      return true;
+    };
+    const route = findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
+    if (route && route.length >= 2) {
+      racer.path = route;
+      racer.pathIndex = 0;
+      racer.exploreTarget = null; // no longer exploring - free up the frontier claim for others
+      game._updateMapPathDots(racer, route);
+      const next = route[1];
+      const parked = game.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === next.fx && o.by === next.fy);
+      if (allowYield && parked && !agent2ChainYield(game, parked) && (racer.idleTicks || 0) >= 3) {
+        agent2ForceYield(game, parked);
+      }
+      if (game._tryClearWayFor(racer, next)) return next;
+      return null;
+    }
+    // Target not reachable over sensed ground yet - fall through to explore.
+  }
+
+  racer.path = null;
+  game._updateMapPathDots(racer, null);
+  if (!pool.length) return null;
+
+  // Deadlock breaker for a racer with no usable route at all (a route-
+  // following racer that's merely stuck gets its own no-progress trigger
+  // above instead).
+  if ((racer.idleTicks || 0) > 20) { racer.scatterSteps = 6; racer.idleTicks = 0; }
+  if ((racer.scatterSteps || 0) > 0) {
+    racer.scatterSteps -= 1;
+    const fwd = pool.filter((c) => !racer.previousCell || c.fx !== racer.previousCell.bx || c.fy !== racer.previousCell.by);
+    const cands = fwd.length ? fwd : pool;
+    return cands[Math.floor(Math.random() * cands.length)];
+  }
+
+  return agent4ExploreStep(game, racer, pool, sensedSet, treatReachedAsObstacle);
 }
 
 // True if some UNOCCUPIED cell in `goalKeys` is reachable from (sx, sy)

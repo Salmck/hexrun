@@ -44,32 +44,8 @@ export function agent2Sense(game, racer, sensedSet = game.agent2Sensed) {
 
 // One decision for one racer. Returns the next cell to step onto, or null to
 // stay put this round. One returned move = one big cell.
-//
-// `opts.sensedSet` defaults to the shared pool (game.agent2Sensed) - agent2's
-// own mode and comparison-experiment modes A/C/D all call this with no
-// options and get the original fully-shared-vision behavior untouched (mode
-// A instead passes each racer's own private Set once its own vision stays
-// unshared - see js/compare.js).
-//
-// `opts.allowYield` defaults to true (agent2's own mode and every comparison
-// mode but B). Comparison mode B passes false: a racer stopped on a goal
-// NEVER gets nudged or slid aside for one behind it, so if the only path to
-// every reachable goal is permanently blocked by one, that arriving racer
-// just waits there forever - see compareCheckStuckRacers in js/compare.js
-// for how that gets detected and marked rather than spinning the round
-// clock forever.
-//
-// `opts.treatReachedAsObstacle` defaults to false (agent2's own mode and
-// comparison modes A/C/D - there, a settled racer blocking the shortest
-// route is expected to eventually yield, so routing straight at/through it
-// and letting the yield machinery resolve occupancy is the right call).
-// Comparison mode B passes true along with allowYield: false, because
-// nothing there ever yields, so a route that plans straight through a
-// permanently-parked racer would just wait on it forever even when a
-// perfectly walkable detour exists - see compareChooseMove.
-export function agent2ChooseMove(game, racer, opts = {}) {
-  const { sensedSet = game.agent2Sensed, allowYield = true, treatReachedAsObstacle = false } = opts;
-  agent2Sense(game, racer, sensedSet);
+export function agent2ChooseMove(game, racer) {
+  agent2Sense(game, racer);
 
   // Open, unoccupied neighbouring cells it could step onto.
   const pool = DIRS
@@ -80,10 +56,9 @@ export function agent2ChooseMove(game, racer, opts = {}) {
   const adjGoal = pool.find((cell) => game._isMapGoal(cell.fx, cell.fy));
   if (adjGoal) return adjGoal;
 
-  // A goal counts as KNOWN the moment it's in this racer's sensed set (shared
-  // pool, or its own private view - whichever sensedSet is in play). Until at
-  // least one is known, keep exploring.
-  const knownGoals = game.mapGoals.filter((g) => sensedSet.has(`${g.bx},${g.by}`));
+  // Vision is shared, so a goal counts as KNOWN the moment any racer has
+  // sensed it. Until at least one is known, keep exploring.
+  const knownGoals = game.mapGoals.filter((g) => game.agent2Sensed.has(`${g.bx},${g.by}`));
   if (knownGoals.length) {
     // Once a goal is known, EVERY still-searching racer heads for the cluster.
     // Aim at the nearest goal NOBODY is stopped on so queuing racers spread
@@ -102,22 +77,12 @@ export function agent2ChooseMove(game, racer, opts = {}) {
       if (d < bestD) { bestD = d; target = g; }
     }
 
-    // A* plans over this racer's sensed map using WALLS ONLY - no racer,
+    // A* plans over the shared sensed map using WALLS ONLY - no racer,
     // stationary or moving, is ever treated as an obstacle, so the line is
     // never bent or held up by another object. Occupancy of the single next
     // cell is the only thing resolved locally (chain-yield for a racer stopped
-    // on a goal in the way, progress-based yield for a moving one) - UNLESS
-    // treatReachedAsObstacle is set (mode B, no yielding), in which case a
-    // settled racer's cell is excluded from the routable map entirely, so
-    // the route bends around it (or around the goal itself, if every known
-    // one is taken) instead of planning straight through/at something that
-    // will never move and just waiting on it forever.
-    const sensedOpen = (x, y) => {
-      if (!sensedSet.has(`${x},${y}`) || !game.blockGrid.blockOpen(x, y)) return false;
-      if (treatReachedAsObstacle && game.mapRacers.some(
-        (o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y)) return false;
-      return true;
-    };
+    // on a goal in the way, progress-based yield for a moving one).
+    const sensedOpen = (x, y) => game.agent2Sensed.has(`${x},${y}`) && game.blockGrid.blockOpen(x, y);
     const route = findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
     if (route && route.length >= 2) {
       // Publish remaining distance so _tryClearWayFor's yield is decided by
@@ -133,7 +98,7 @@ export function agent2ChooseMove(game, racer, opts = {}) {
       // racer (and any behind it) along to the nearest empty goal, freeing this
       // cell for the arriver.
       const parked = game.mapRacers.find((o) => o !== racer && o.status === 'reached' && o.bx === next.fx && o.by === next.fy);
-      if (allowYield && parked && !agent2ChainYield(game, parked) && (racer.idleTicks || 0) >= 3) {
+      if (parked && !agent2ChainYield(game, parked) && (racer.idleTicks || 0) >= 3) {
         // Chain-yield couldn't slide it cleanly this round (a link in the chain
         // is mid-animation) and the arriver has already waited a few rounds -
         // so bump the occupant off directly instead of letting the wait build
@@ -141,11 +106,6 @@ export function agent2ChooseMove(game, racer, opts = {}) {
         // oscillation. The bumped racer re-plans straight back onto a free goal.
         agent2ForceYield(game, parked);
       }
-      // allowYield === false: `parked` (if any) just sits there - _tryClearWayFor
-      // below can't move it either (a 'reached' racer always fails
-      // _forceVacate's own status check), so this racer waits on this exact
-      // cell forever if nothing else ever frees it. That's the intended
-      // behavior, not a bug - see this function's own doc comment.
       // A racer on a live route NEVER scatters: it keeps its path (and thus its
       // finishing priority) and leans on _tryClearWayFor to shuffle whoever
       // holds the next cell out of the way - force-vacating a chain of solvers
@@ -180,14 +140,13 @@ export function agent2ChooseMove(game, racer, opts = {}) {
     return cands[Math.floor(Math.random() * cands.length)];
   }
 
-  return agent2ExploreStep(game, racer, pool, sensedSet);
+  return agent2ExploreStep(game, racer, pool);
 }
 
 // One blind-exploration step: prefer ground nobody has stood on (shared
 // visited), don't immediately double back, and head toward the least-seen
-// direction (per `sensedSet` - the shared pool, or a racer's own private
-// view) so that map keeps growing outward.
-function agent2ExploreStep(game, racer, pool, sensedSet) {
+// direction so the shared map keeps growing outward.
+function agent2ExploreStep(game, racer, pool) {
   const fresh = pool.filter((cell) => !game.agent2Visited.has(`${cell.fx},${cell.fy}`));
   if (fresh.length) pool = fresh;
 
@@ -197,7 +156,7 @@ function agent2ExploreStep(game, racer, pool, sensedSet) {
   }
 
   const unseenAround = (cell) => DIRS
-    .filter(([dx, dy]) => !sensedSet.has(`${cell.fx + dx},${cell.fy + dy}`)).length;
+    .filter(([dx, dy]) => !game.agent2Sensed.has(`${cell.fx + dx},${cell.fy + dy}`)).length;
   const most = Math.max(...pool.map(unseenAround));
   pool = pool.filter((cell) => unseenAround(cell) === most);
 
@@ -211,7 +170,7 @@ function agent2ExploreStep(game, racer, pool, sensedSet) {
 // the cell the arriver needs. Every shifted racer stays 'reached' (it only hops
 // goal->adjacent goal and re-settles at once), so the cluster shuffles over by
 // one. Returns true if parked's cell was freed.
-function agent2ChainYield(game, parked) {
+export function agent2ChainYield(game, parked) {
   const goalAt = (x, y) => game.mapGoals.some((g) => g.bx === x && g.by === y);
   const racerOn = (x, y) => game.mapRacers.find((r) => r.bx === x && r.by === y);
 
@@ -271,7 +230,7 @@ function agent2ChainYield(game, parked) {
 // neighbour so the waiting arriver can take the cell now instead of livelocking
 // into a retreat. `parked` becomes a free solver again and re-plans back onto a
 // free goal (re-settling the moment it lands on one). Returns true if it moved.
-function agent2ForceYield(game, parked) {
+export function agent2ForceYield(game, parked) {
   if (parked.shape.isBusy() || parked.pendingDir) return false;
   const dest = DIRS
     .map(([dx, dy]) => ({ fx: parked.bx + dx, fy: parked.by + dy }))
