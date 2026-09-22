@@ -27,10 +27,23 @@
 // engine: game.compareMode selects one of four variants (a/b/c/d, picked in
 // the panel) that every racer in the session uses.
 //
-// - C, D run the engine unchanged (fully shared field of view from the very
-//   first tick, yielding enabled) - D exists specifically as that untouched
-//   baseline to compare A against; C is still the same placeholder seam as
-//   D until it gets its own distinct logic.
+// - D runs the engine unchanged (fully shared field of view from the very
+//   first tick, yielding enabled) - the untouched baseline every other mode
+//   is compared against.
+// - C also runs the engine unchanged for a still-'solving' racer, but a
+//   'reached' one does NOT freeze in place forever like it does in every
+//   other mode: see compareUpdateClusterSettle. Each goal cell has a fixed
+//   "depth" (computeGoalDepths - a BFS distance from the nearest goal cell
+//   that touches open, non-goal ground, i.e. how many goal-to-goal hops
+//   deep into the cluster it sits), and a settled racer keeps drifting
+//   toward whatever currently-free cell is deepest, one hop at a time,
+//   for as long as a deeper free cell exists - never leaving the cluster
+//   itself. Multiple racers do this independently and simultaneously (no
+//   shared turn order), so boundary/entrance cells tend to open up on
+//   their own as occupants migrate inward, without needing an explicit
+//   yield most of the time. The existing chain/force-yield below is still
+//   there as a fallback for the case a newcomer's target cell is occupied
+//   by a racer that's already as deep as it can currently get.
 // - A withholds the shared field of view: each racer only "knows" what it
 //   personally has sensed (including which frontiers it's found), so
 //   goal-discovery doesn't instantly propagate to the whole swarm. The
@@ -60,6 +73,90 @@ export function compareSetupState(game, starts) {
   // by B/C/D, which always pass compareChooseMoveImpl the shared pool
   // (game.agent2Sensed) directly.
   game.compareVisionShared = false;
+  // Only meaningful for mode C (see compareUpdateClusterSettle) - cheap
+  // enough to just always compute, and game.mapGoals/blockGrid are already
+  // both set by the time this runs (see Game#_setupMapMode).
+  game.compareGoalDepth = computeGoalDepths(game);
+}
+
+// Each goal cell's depth: 0 for one that touches open, non-goal ground (an
+// "entrance" to the cluster), and +1 for every further goal-to-goal hop
+// inward from there - a plain BFS over the goal cells themselves, using
+// their adjacency to each other as the graph. Static for the whole run
+// (the cluster's shape never changes once generated).
+function computeGoalDepths(game) {
+  const goalSet = new Set(game.mapGoals.map((g) => `${g.bx},${g.by}`));
+  const depth = new Map();
+  const queue = [];
+  for (const g of game.mapGoals) {
+    const key = `${g.bx},${g.by}`;
+    const touchesOpenGround = DIRS.some(([dx, dy]) => {
+      const nx = g.bx + dx, ny = g.by + dy;
+      return game.blockGrid.blockOpen(nx, ny) && !goalSet.has(`${nx},${ny}`);
+    });
+    if (touchesOpenGround) { depth.set(key, 0); queue.push({ bx: g.bx, by: g.by }); }
+  }
+  let head = 0;
+  while (head < queue.length) {
+    const cur = queue[head++];
+    const d = depth.get(`${cur.bx},${cur.by}`);
+    for (const [dx, dy] of DIRS) {
+      const nx = cur.bx + dx, ny = cur.by + dy;
+      const key = `${nx},${ny}`;
+      if (!goalSet.has(key) || depth.has(key)) continue;
+      depth.set(key, d + 1);
+      queue.push({ bx: nx, by: ny });
+    }
+  }
+  return depth;
+}
+
+// Mode C only (no-op call for every other mode/strategy): a settled racer
+// keeps drifting toward the goal cluster's interior instead of freezing.
+// Called once per tick (see Game#_tick), independent of the normal
+// still-'solving' decision loop, which never runs for a 'reached' racer.
+export function compareUpdateClusterSettle(game) {
+  if (game.mapStrategy !== 'compare' || game.compareMode !== 'c' || !game.compareGoalDepth) return;
+  for (const r of game.mapRacers) {
+    if (r.status !== 'reached' || r.shape.isBusy() || r.pendingDir || (r.pendingGapMs || 0) > 0) continue;
+    const next = clusterSettleStep(game, r);
+    if (!next) continue;
+    // Vacating this goal cell - reset its marker to neutral before moving,
+    // same as agent2ChainYield/agent2ForceYield already do when THEY slide
+    // a settled racer off its cell. _applyMapMove's own arrival handling
+    // only ever paints the cell a racer just landed ON, in that racer's own
+    // color - every other path that lands a racer on a goal is a one-way
+    // trip, so there was never an old cell to clean up on the way out
+    // before this.
+    const gi = game.mapGoals.findIndex((g) => g.bx === r.bx && g.by === r.by);
+    if (gi >= 0) game.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
+    game._applyMapMove(r, next);
+  }
+}
+
+// The single adjacent goal cell to move to next, or null if none exists (no
+// neighbour is both part of the cluster, strictly deeper than here, AND
+// currently free - including the case where this racer is already as deep
+// as it can currently get). A plain greedy one-hop look, not a routed path:
+// growGoalCluster deliberately grows the cluster as a thin, non-enclosing
+// shape (see its own comment in agent2.js), so the depth gradient along any
+// simple path through it is expected to stay smooth enough that a racer
+// heading for whichever immediate neighbour is deepest reaches the interior
+// just as well as a fully routed multi-hop plan would, without needing a
+// second pathfinding pass over a goal-cluster subgraph.
+function clusterSettleStep(game, racer) {
+  const depths = game.compareGoalDepth;
+  const curDepth = depths.get(`${racer.bx},${racer.by}`) ?? 0;
+  let best = null, bestDepth = curDepth;
+  for (const [dx, dy] of DIRS) {
+    const nx = racer.bx + dx, ny = racer.by + dy;
+    const d = depths.get(`${nx},${ny}`);
+    if (d === undefined || d <= bestDepth) continue;
+    if (!game._mapCellAvailable(nx, ny, racer)) continue;
+    bestDepth = d;
+    best = { fx: nx, fy: ny };
+  }
+  return best;
 }
 
 // Mode A's private-vision phase ends the instant any racer has actually

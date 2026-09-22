@@ -6,7 +6,7 @@ import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=92';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=17';
-import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=10';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers, compareUpdateClusterSettle } from './compare.js?v=11';
 import { buildXlsxDataUrl } from './xlsx-export.js?v=2';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
@@ -3152,6 +3152,14 @@ export class Game {
         const tracePositionsBefore = compareRunning
           ? this.mapRacers.map((r) => ({ bx: r.bx, by: r.by }))
           : null;
+        // Mode C only (no-op everywhere else) - a settled racer keeps
+        // drifting toward the goal cluster's interior instead of freezing
+        // forever; see compareUpdateClusterSettle's own comment. Runs after
+        // tracePositionsBefore is snapshotted (so any move it makes still
+        // gets picked up by the movingDir/anyMoved diff below) but before
+        // the main per-racer loop (so a racer it just moved is already
+        // correctly seen as busy this same frame - no double-move risk).
+        compareUpdateClusterSettle(this);
         for (const racer of this.mapRacers) {
           if (!racer.shape.isBusy()) {
             if (racer.pendingDir) {
