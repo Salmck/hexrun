@@ -6,7 +6,7 @@ import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=90';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=16';
-import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=7';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=8';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -1851,6 +1851,17 @@ export class Game {
 
   _decideNextMoveMap(racer) {
     if (racer.status !== 'solving') return;
+    // compareStuck (mode B only - see compareCheckStuckRacers) means this
+    // racer has been PROVEN unable to ever reach a goal, not just having a
+    // hard time right now. Without this it keeps calling back into
+    // compareChooseMove every tick forever, and once every cell it could
+    // possibly reach has already been visited and sensed, agent2ExploreStep
+    // has nothing left to prefer - it just bounces randomly between
+    // whichever handful of cells are left in its sealed-off pocket, which
+    // looks like aimless circling, not exploring, because there is nothing
+    // left TO explore. Settling in place once the verdict is final is more
+    // honest than pretending it's still searching.
+    if (racer.compareStuck) return;
 
     let next;
     if (this.mapStrategy === 'explore') {

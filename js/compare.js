@@ -156,6 +156,8 @@ export function compareCheckStuckRacers(game) {
     if (r.status !== 'solving' || r.compareStuck) continue;
     if (!bfsCanReachAGoal(open, r.bx, r.by, openGoalKeys)) {
       r.compareStuck = true;
+      r.path = null;
+      game._updateMapPathDots(r, null); // settling for good - no line left to show
       game.compareStats.stuckRacerIds.push(r.id);
     }
   }
