@@ -34,8 +34,43 @@ export function agent2SetupState(game, starts) {
 // Adds the racer's own cell and its four neighbours to the given sensed set
 // (game.agent2Sensed - the shared pool - unless the caller passes its own).
 export function agent2Sense(game, racer, sensedSet = game.agent2Sensed) {
-  sensedSet.add(`${racer.bx},${racer.by}`);
-  for (const [dx, dy] of DIRS) sensedSet.add(`${racer.bx + dx},${racer.by + dy}`);
+  markSensed(game, sensedSet, racer.bx, racer.by);
+  for (const [dx, dy] of DIRS) markSensed(game, sensedSet, racer.bx + dx, racer.by + dy);
+}
+
+// Adds one cell to `sensedSet` and, the first time it enters the actual
+// SHARED pool (game.agent2Sensed specifically, by reference) tells game.js
+// to paint the "explored" ground highlight there - mirrors agent4Sense's own
+// markSensed/_markMapExplored pairing (see js/agent4.js), a no-op wherever
+// the ground isn't set up with that paintable canvas (every mode but agent3/
+// agent4/compare - see Game#_setupMapMode).
+//
+// A private per-racer set (comparison-experiment mode A, pre-unlock - see
+// js/compare.js) is deliberately NOT painted here: the point of that phase
+// is that nothing is shared yet, so the ground should show nothing until
+// compareUnlockSharedVision folds every racer's private view into this same
+// shared Set - paintSharedCells (called from there) paints that whole
+// backlog at once, in the same round the unlock happens, rather than
+// leaking it out one cell at a time as if it had only just been sensed.
+function markSensed(game, sensedSet, x, y) {
+  const isShared = sensedSet === game.agent2Sensed;
+  const k = `${x},${y}`;
+  const isNew = !sensedSet.has(k);
+  sensedSet.add(k);
+  if (isShared && isNew && game._markMapExplored) game._markMapExplored(x, y);
+}
+
+// Paints every cell currently in the shared pool onto the ground in one
+// pass - used once, right when comparison-experiment mode A's vision
+// unlocks (see compareUnlockSharedVision), so a private phase's whole
+// accumulated backlog shows up on the ground in a single instant instead of
+// gradually as if each cell were only just discovered.
+export function paintSharedCells(game) {
+  if (!game._markMapExplored) return;
+  for (const key of game.agent2Sensed) {
+    const sep = key.indexOf(',');
+    game._markMapExplored(Number(key.slice(0, sep)), Number(key.slice(sep + 1)));
+  }
 }
 
 // --------------------------------------------------------------------------

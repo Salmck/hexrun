@@ -3,10 +3,10 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
-import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=91';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=92';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=17';
-import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=9';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=10';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -279,6 +279,27 @@ export class Game {
     if (idx === -1) idx = 0;
     const remaining = r.path.slice(idx + 1);
     return remaining.length ? remaining.map((c) => [c.fx, c.fy]) : null;
+  }
+
+  // Pushed once, right at setup, before anything has run - round 0, the
+  // pristine starting layout (nobody's sensed anything yet, nobody has a
+  // route or a direction). Without this, frames[] started at round 1, which
+  // is already the result of everyone's FIRST exploration step - there was
+  // no way to see the actual starting positions in the exported/replayed
+  // trace at all. Not a counted round: it doesn't touch compareStats, and
+  // totalRounds/completedAtRound still mean exactly what they always have
+  // (tickCount's value) - this is simply frames[0], one extra entry ahead of
+  // round 1's.
+  _compareRecordInitialFrame() {
+    const { blocksX, blocksY } = this.blockGrid;
+    this.compareTrace.push({
+      round: 0,
+      exploredMask: this._rleEncodeGrid(blocksX, blocksY, () => false),
+      racers: this.mapRacers.map((r) => ({
+        id: r.id, bx: r.bx, by: r.by, status: r.status, movingDir: null, path: null,
+      })),
+      yields: [],
+    });
   }
 
   _compareRecordTraceFrame(beforePositions) {
@@ -1533,14 +1554,17 @@ export class Game {
 
     const groundGeo = new THREE.PlaneGeometry(maxX - minX, maxZ - minZ);
     let groundMat;
-    if (usesLineMap) {
+    if (usesLineMap || isCompare) {
       // Agent modes 3 and 4's "explored map" highlight is painted directly
       // onto the ground's own texture (one canvas cell per block cell)
       // rather than a second overlapping mesh at a slightly different height -
       // two near-coplanar transparent surfaces fighting over draw order as
       // the camera moves is exactly what caused it to flicker, and z-fixing
       // it with a bigger offset would just be papering over the same
-      // structural problem. A single surface can't fight itself.
+      // structural problem. A single surface can't fight itself. Compare
+      // mode reuses the exact same canvas (see _markMapExplored, called from
+      // agent2Sense below) - it has no goal LINES of its own, just the same
+      // "light up ground the shared pool has actually sensed" need.
       const px = 6; // canvas pixels per block cell - plenty crisp, tiny texture
       const canvas = document.createElement('canvas');
       canvas.width = blocksX * px;
@@ -1802,7 +1826,10 @@ export class Game {
       // ORIGINAL layout, not wherever everyone has since wandered/settled to.
       const snapshot = this.mapRacers.map((r) => ({ bx: r.bx, by: r.by, id: r.id, robotType: r.robotType }));
       if (isAgent4) this.agent4InitialSnapshot = snapshot;
-      else this.compareInitialSnapshot = snapshot;
+      else {
+        this.compareInitialSnapshot = snapshot;
+        this._compareRecordInitialFrame();
+      }
       // A freshly (re)generated map starts paused in both modes - map
       // size/seed/task count/routing choice are all easy to change right up
       // until the moment someone's actually ready to watch it run, and a

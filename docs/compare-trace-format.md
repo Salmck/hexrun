@@ -75,9 +75,17 @@ trace 文件是自包含的——不需要配套的配置 JSON 也能看懂整�
 
 ## 每一轮的记录（`frames[i]`）
 
+**`frames[0]` 永远是 `round: 0`——地图刚生成、还没运行过一步的初始状态**：每个物体都在
+自己的出生格，`exploredMask` 全是"未探索"，`path`/`movingDir` 全是 `null`。这一帧不算
+一个"真正的回合"（不计入 `totalRounds`，也不会被 `completedAtRound` 引用），只是为了让
+回放能从物体真正的出发点开始，而不是从"已经探索了一步"的状态开始。从 `frames[1]` 起才
+是 `round: 1, 2, 3...`，跟 `discoveredAtRound`/`completedAtRound`/`totalRounds` 用的是
+同一套编号。
+
 ```jsonc
 {
-  "round": 1,                     // 第几轮（从 1 开始，跟 completedAtRound 等字段同一套编号）
+  "round": 1,                     // 第几轮（从 1 开始，跟 completedAtRound 等字段同一套编号）；
+                                    // frames[0] 是特例，见上面的说明
   "exploredMask": [0, 23, 1, 6, ...], // 见下面的“exploredMask 解码”
   "racers": [
     {
@@ -162,6 +170,12 @@ function decodeMask(runs, blocksX, blocksY) {
 > "格子外邻居"（比如站在 `(0,0)` 会顺带标记 `(-1,0)`）——这些格子根本不在地图范围内，
 > 屏幕上从来没有、也不可能显示它们，所以 `exploredMask` 只编码地图内的真实格子，
 > 是有意如此，不是漏数据。
+
+`exploredMask` 记的这个"共享已探索区域"，现在游戏本身也会实时画出来（跟 agent3/agent4
+的"已知格子"高亮是同一套机制，直接画在地面贴图上）：格子一旦真正进入共享池
+（`game.agent2Sensed`），地面就会立刻亮起来。模式 A 解锁共享之前，这块地面会保持暗着
+不亮——因为这时候确实什么都还没共享；一旦解锁，所有物体私下攒的视野会在同一瞬间一次性
+点亮，跟 `exploredMask` 那种"先保持全暗、解锁那一刻突然跳变"的规律完全对应。
 
 ## 怎么用这份数据
 

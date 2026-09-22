@@ -48,7 +48,7 @@
 //   detects that exactly (a flood-fill, not a guess) and marks it, so the
 //   round counter still stops instead of running forever waiting on
 //   something that provably can't happen.
-import { agent2SetupState, agent2Sense, agent2ChainYield, agent2ForceYield } from './agent2.js?v=91';
+import { agent2SetupState, agent2Sense, agent2ChainYield, agent2ForceYield, paintSharedCells } from './agent2.js?v=92';
 import { agent4ExploreStep } from './agent4.js?v=17';
 import { findPath } from './maze.js?v=26';
 
@@ -83,6 +83,11 @@ export function compareUnlockSharedVision(game) {
     if (!r.comparePrivateSensed) continue;
     for (const key of r.comparePrivateSensed) game.agent2Sensed.add(key);
   }
+  // Light up the whole backlog on the ground in this one instant, rather
+  // than leaving it dark (nothing was ever painted for a private set) or
+  // trickling in cell by cell as if only just discovered - see
+  // agent2Sense/paintSharedCells's own comments.
+  paintSharedCells(game);
 }
 
 // Game#_applyMapMove senses from a racer's newly-arrived cell right after
