@@ -3124,19 +3124,31 @@ export class Game {
         // complete (completedAt === null) - pausing doesn't count against
         // them, and once every racer has settled the round count stops for
         // good instead of idling upward forever while the finished map just
-        // sits there. tickCount is bumped FIRST, before this round's own
+        // sits there.
+        //
+        // "A round" means a racer actually stepped onto a new cell this
+        // frame - NOT one more rendered animation frame. The game itself
+        // runs at whatever the display's real framerate is (60fps and up),
+        // but a racer's roll animation spans several of those frames before
+        // it lands on the next cell, so MOST frames have nobody moving at
+        // all (still mid-tumble, or waiting out pendingGapMs) - counting
+        // every single one of those as "a round" made 总轮数 a framerate-
+        // driven number with no real relationship to how much actually
+        // happened. tickCount is bumped SPECULATIVELY, before this frame's
         // decisions run, so a discovery/completion _applyMapMove detects
-        // during this very tick (see there) reports the round it actually
-        // happened on, not the count from before it. totalTickMs measures
-        // the REAL (wall-clock) cost of a counted round's decision-making,
-        // separately from the simulated dt.
+        // during this very frame (see there) reports the round it actually
+        // happened on - then rolled back below if it turns out nobody
+        // actually moved, so a round that never happened is never counted
+        // (and never gets a trace frame - see _compareRecordTraceFrame's
+        // own call below, only reached when something did move).
         const compareRunning = this.compareStats && this.compareStats.completedAt === null;
         const perfStart = compareRunning ? performance.now() : 0;
         if (compareRunning) this.compareStats.tickCount++;
-        // Snapshotted before this round's decisions run, purely for the
-        // trace export below - lets each racer's movingDir be read off as a
-        // plain "did bx/by change, and which way" diff afterward, with no
-        // need to instrument _applyMapMove itself.
+        // Snapshotted before this round's decisions run - lets each racer's
+        // movingDir be read off as a plain "did bx/by change, and which
+        // way" diff afterward (no need to instrument _applyMapMove itself),
+        // and also doubles as this frame's "did ANYTHING actually move"
+        // check below.
         const tracePositionsBefore = compareRunning
           ? this.mapRacers.map((r) => ({ bx: r.bx, by: r.by }))
           : null;
@@ -3159,8 +3171,21 @@ export class Game {
         if (this.mapStrategy === 'agent4') this._updateAgent4Recenter();
         if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
         if (compareRunning) {
-          this.compareStats.totalTickMs += performance.now() - perfStart;
-          this._compareRecordTraceFrame(tracePositionsBefore);
+          const anyMoved = this.mapRacers.some((r, i) =>
+            r.bx !== tracePositionsBefore[i].bx || r.by !== tracePositionsBefore[i].by);
+          if (anyMoved) {
+            this.compareStats.totalTickMs += performance.now() - perfStart;
+            this._compareRecordTraceFrame(tracePositionsBefore);
+          } else {
+            // Nobody actually moved this frame - undo the speculative bump
+            // above, so it's as if this frame never happened for counting
+            // purposes. Safe to roll back unconditionally: discoveredAt/
+            // completedAt only ever get set from inside _applyMapMove,
+            // which never runs without also changing some racer's bx/by -
+            // so if anyMoved is false, neither could have been freshly set
+            // this frame either.
+            this.compareStats.tickCount--;
+          }
         }
       }
       this._reportStats();
