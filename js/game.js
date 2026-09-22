@@ -267,6 +267,17 @@ export class Game {
   // the encoded form stays tiny (a handful of numbers) even deep into a
   // long run on a big map. See _rleEncodeGrid's own comment for the exact
   // format and how to decode it back into a full grid.
+  // Returns the racer's remaining A* route ahead of its current cell, as
+  // plain [x,y] pairs, or null if it has none worth drawing - see the call
+  // site's comment for why this can't just be a fixed slice(1)/slice(N).
+  _compareRemainingPath(r) {
+    if (r.status === 'reached' || !r.path || r.path.length < 2) return null;
+    let idx = r.path.findIndex((c) => c.fx === r.bx && c.fy === r.by);
+    if (idx === -1) idx = 0;
+    const remaining = r.path.slice(idx + 1);
+    return remaining.length ? remaining.map((c) => [c.fx, c.fy]) : null;
+  }
+
   _compareRecordTraceFrame(beforePositions) {
     const { blocksX, blocksY } = this.blockGrid;
     const exploredMask = this._rleEncodeGrid(blocksX, blocksY, (x, y) => this.agent2Sensed.has(`${x},${y}`));
@@ -280,11 +291,19 @@ export class Game {
         status: r.status,
         movingDir: (dx || dy) ? { dx, dy } : null,
         // A 'reached' racer's dots are cleared the instant it settles (see
-        // _applyMapMove's arrival handling) even though racer.path itself
-        // is left stale (pointing at wherever it was routing to right
-        // before it landed) - null it here too so this matches what's
-        // actually shown, not the raw field.
-        path: (r.status === 'reached' || !r.path) ? null : r.path.map((c) => [c.fx, c.fy]),
+        // _applyMapMove's arrival handling) even though racer.path itself is
+        // left stale - null it here too so this matches what's actually
+        // shown, not the raw field. For a still-solving racer, racer.path is
+        // wherever it was last planned FROM - compare mode's routing
+        // (agent2ChooseMove) fully re-plans it fresh every tick BEFORE
+        // applying that tick's move, so by the time this runs (after the
+        // move), the racer's current cell can sit at path[0] (didn't move
+        // this tick) or path[1] (did) depending on timing - there's no fixed
+        // offset that's always right. Locate the racer's actual current cell
+        // in its own path and drop everything through it, same end result as
+        // the live dots' path.slice(1) (which runs right when the route is
+        // computed, before any move, so the current cell is always at [0]).
+        path: this._compareRemainingPath(r),
       };
     });
     const yields = this.compareStats.pendingYields;
