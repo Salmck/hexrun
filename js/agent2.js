@@ -45,20 +45,30 @@ export function agent2Sense(game, racer, sensedSet = game.agent2Sensed) {
 // One decision for one racer. Returns the next cell to step onto, or null to
 // stay put this round. One returned move = one big cell.
 //
-// `sensedSet` defaults to the shared pool (game.agent2Sensed) - agent2's own
-// mode and comparison-experiment modes A/C/D all call this with no third
-// argument and get the original fully-shared-vision behavior untouched
-// (mode A instead passes each racer's own private Set once its own vision
-// stays unshared - see js/compare.js).
+// `opts.sensedSet` defaults to the shared pool (game.agent2Sensed) - agent2's
+// own mode and comparison-experiment modes A/C/D all call this with no
+// options and get the original fully-shared-vision behavior untouched (mode
+// A instead passes each racer's own private Set once its own vision stays
+// unshared - see js/compare.js).
 //
-// `allowYield` defaults to true (agent2's own mode and every comparison
+// `opts.allowYield` defaults to true (agent2's own mode and every comparison
 // mode but B). Comparison mode B passes false: a racer stopped on a goal
 // NEVER gets nudged or slid aside for one behind it, so if the only path to
 // every reachable goal is permanently blocked by one, that arriving racer
 // just waits there forever - see compareCheckStuckRacers in js/compare.js
 // for how that gets detected and marked rather than spinning the round
 // clock forever.
-export function agent2ChooseMove(game, racer, sensedSet = game.agent2Sensed, allowYield = true) {
+//
+// `opts.treatReachedAsObstacle` defaults to false (agent2's own mode and
+// comparison modes A/C/D - there, a settled racer blocking the shortest
+// route is expected to eventually yield, so routing straight at/through it
+// and letting the yield machinery resolve occupancy is the right call).
+// Comparison mode B passes true along with allowYield: false, because
+// nothing there ever yields, so a route that plans straight through a
+// permanently-parked racer would just wait on it forever even when a
+// perfectly walkable detour exists - see compareChooseMove.
+export function agent2ChooseMove(game, racer, opts = {}) {
+  const { sensedSet = game.agent2Sensed, allowYield = true, treatReachedAsObstacle = false } = opts;
   agent2Sense(game, racer, sensedSet);
 
   // Open, unoccupied neighbouring cells it could step onto.
@@ -96,8 +106,18 @@ export function agent2ChooseMove(game, racer, sensedSet = game.agent2Sensed, all
     // stationary or moving, is ever treated as an obstacle, so the line is
     // never bent or held up by another object. Occupancy of the single next
     // cell is the only thing resolved locally (chain-yield for a racer stopped
-    // on a goal in the way, progress-based yield for a moving one).
-    const sensedOpen = (x, y) => sensedSet.has(`${x},${y}`) && game.blockGrid.blockOpen(x, y);
+    // on a goal in the way, progress-based yield for a moving one) - UNLESS
+    // treatReachedAsObstacle is set (mode B, no yielding), in which case a
+    // settled racer's cell is excluded from the routable map entirely, so
+    // the route bends around it (or around the goal itself, if every known
+    // one is taken) instead of planning straight through/at something that
+    // will never move and just waiting on it forever.
+    const sensedOpen = (x, y) => {
+      if (!sensedSet.has(`${x},${y}`) || !game.blockGrid.blockOpen(x, y)) return false;
+      if (treatReachedAsObstacle && game.mapRacers.some(
+        (o) => o !== racer && o.status === 'reached' && o.bx === x && o.by === y)) return false;
+      return true;
+    };
     const route = findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
     if (route && route.length >= 2) {
       // Publish remaining distance so _tryClearWayFor's yield is decided by

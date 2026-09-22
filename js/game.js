@@ -3,10 +3,10 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
-import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=89';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=90';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=16';
-import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=6';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=7';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -1934,7 +1934,17 @@ export class Game {
         // own comment for why waiting for compareChooseMove to get around to
         // it (the only place this used to run) could lag the real arrival by
         // several rounds. No-op for every mode/strategy but compare mode A.
-        if (this.mapStrategy === 'compare') compareUnlockSharedVision(this);
+        if (this.mapStrategy === 'compare') {
+          compareUnlockSharedVision(this);
+          // Mode B only (no-op elsewhere) - a fresh 'reached' racer is the
+          // only thing that can newly seal off a route in that mode (walls
+          // never change), so this is the one moment worth re-checking every
+          // still-solving racer's actual reachability - see
+          // compareCheckStuckRacers's own comment for why that's an exact
+          // flood-fill rather than a guess based on how long something's
+          // been idle.
+          compareCheckStuckRacers(this);
+        }
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
         const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);
         if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(RACER_COLORS[racer.id % RACER_COLORS.length]);
@@ -3024,11 +3034,6 @@ export class Game {
         if (this.mapStrategy === 'agent4') this._updateAgent4Recenter();
         if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
         if (compareRunning) {
-          // Checked every counted round (not just after an arrival) since a
-          // racer can cross the stuck threshold on any round, arrival or
-          // not - see compareCheckStuckRacers for why this is what makes
-          // mode B's round clock stop even when not everyone ever reaches.
-          compareCheckStuckRacers(this);
           this.compareStats.totalTickMs += performance.now() - perfStart;
           this._compareRecordTraceFrame(tracePositionsBefore);
         }
