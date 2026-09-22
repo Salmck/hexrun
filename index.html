@@ -33,6 +33,10 @@
       <button id="btn-reset" type="button">重置</button>
       <button id="btn-save-map" type="button" hidden>保存地图</button>
       <button id="btn-open-map" type="button" hidden>打开地图</button>
+      <!-- Compare mode only (see main.js syncRacerControl) - exports the
+           current map info + the #compare-stats-panel's own numbers as a
+           two-sheet .xlsx workbook, see Game#exportCompareExcel. -->
+      <button id="btn-export-excel" type="button" hidden>导出数据(Excel)</button>
       <button id="btn-color-panel" type="button" hidden>颜色设置</button>
       <input id="open-map-file" type="file" accept="application/json" hidden style="display:none" />
       <!-- Only unhidden in agent mode 4 or compare mode (see main.js
@@ -101,6 +105,6 @@
     </div>
   </div>
 
-  <script type="module" src="js/main.js?v=138"></script>
+  <script type="module" src="js/main.js?v=140"></script>
 </body>
 </html>

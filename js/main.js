@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=136';
+import { Game } from './game.js?v=138';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -22,6 +22,7 @@ const compareProbLabel = document.getElementById('compare-prob-label');
 const compareProbInput = document.getElementById('compare-prob');
 const saveMapBtn = document.getElementById('btn-save-map');
 const openMapBtn = document.getElementById('btn-open-map');
+const exportExcelBtn = document.getElementById('btn-export-excel');
 const openMapFile = document.getElementById('open-map-file');
 const controlsBreak = document.getElementById('controls-break');
 const colorPanelBtn = document.getElementById('btn-color-panel');
@@ -91,6 +92,7 @@ const syncRacerControl = () => {
   compareProbLabel.hidden = !isCompare;
   saveMapBtn.hidden = !usesMapPanel;
   openMapBtn.hidden = !usesMapPanel;
+  exportExcelBtn.hidden = !isCompare; // only compare mode has a #compare-stats-panel to export
   controlsBreak.hidden = !usesMapPanel;
   if (isAgent4) {
     agent4MapSizeInput.value = String(game.agent4MapSize);
@@ -271,6 +273,10 @@ compareProbInput.addEventListener('change', applyCompareObstacleProb);
 
 saveMapBtn.addEventListener('click', () => {
   game.saveMapConfig();
+});
+
+exportExcelBtn.addEventListener('click', () => {
+  game.exportCompareExcel();
 });
 
 openMapBtn.addEventListener('click', () => {

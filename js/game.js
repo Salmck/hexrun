@@ -7,6 +7,7 @@ import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } f
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=17';
 import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers } from './compare.js?v=10';
+import { buildXlsxDataUrl } from './xlsx-export.js?v=2';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -589,6 +590,67 @@ export class Game {
     // alone can easily double or triple the size of a file already this
     // repetitive.
     this._downloadText(`hexrun-compare-map-${stamp}-trace.json`, JSON.stringify(this._compareBuildTraceExport()), 'application/json');
+  }
+
+  // Exports the current compare-mode map's static info plus the live stats
+  // panel's own numbers as a two-sheet .xlsx workbook (see js/xlsx-export.js
+  // for the writer itself) - the same underlying values as saveCompareMap's
+  // JSON config and the on-screen #compare-stats-panel, just packaged for
+  // someone who wants to read or chart them in a spreadsheet instead of
+  // parsing JSON or reading them off the screen. Safe to call at any point
+  // in a run - stats not reached yet read back as '--', matching the panel.
+  exportCompareExcel() {
+    if (this.mapStrategy !== 'compare') return;
+    const stamp = `${this.compareMapSize}x${this.compareMapSize}-r${this.racerCount}-seed${this.compareLastSeed}`;
+    const { blocksX, blocksY, blockOpen } = this.blockGrid;
+    let wallCount = 0;
+    for (let y = 0; y < blocksY; y++) {
+      for (let x = 0; x < blocksX; x++) if (!blockOpen(x, y)) wallCount++;
+    }
+
+    const mapRows = [
+      ['项目', '值'],
+      ['寻路模式', this.compareMode.toUpperCase()],
+      ['地图边长(设置值)', this.compareMapSize],
+      ['实际地图宽度', blocksX],
+      ['实际地图高度', blocksY],
+      ['障碍物生成概率', this.compareObstacleProbability],
+      ['墙体格子数', wallCount],
+      ['随机种子', this.compareLastSeed],
+      ['物体数量', this.mapRacers.length],
+      ['终点数量', this.mapGoals.length],
+      [''],
+      ['物体明细'],
+      ['编号', '起始X', '起始Y', '本体颜色'],
+      ...this.mapRacers.map((r, i) => {
+        const start = this.compareInitialSnapshot?.[i] || r;
+        return [r.id, start.bx, start.by, this.getAgent4RacerColorHex(r.id)];
+      }),
+    ];
+
+    // Same fields, same fallback-to-'--' rule, as main.js's own
+    // updateCompareStatsPanel - see there for why each one reads the way it
+    // does (round counts, not timestamps; totalTickMs/tickCount for the
+    // average; etc).
+    const s = this.compareStats || {};
+    const stuckCount = s.stuckRacerIds ? s.stuckRacerIds.length : 0;
+    const totalSteps = this.mapRacers.reduce((sum, r) => sum + r.steps, 0);
+    const statsRows = [
+      ['项目', '值'],
+      ['发现目标轮数', s.discoveredAt ?? '--'],
+      ['发现到完成轮数', (s.discoveredAt != null && s.completedAt != null) ? s.completedAt - s.discoveredAt : '--'],
+      ['总让位次数', s.yieldCount ?? 0],
+      ['总步数', totalSteps],
+      ['总轮数', s.tickCount ?? 0],
+      ['平均每轮耗时(ms)', s.tickCount ? Number((s.totalTickMs / s.tickCount).toFixed(3)) : '--'],
+      ['无法到达数', stuckCount],
+    ];
+
+    const dataUrl = buildXlsxDataUrl([
+      { name: '地图信息', rows: mapRows },
+      { name: '数据面板', rows: statsRows },
+    ]);
+    this._downloadDataUrl(`hexrun-compare-map-${stamp}-data.xlsx`, dataUrl);
   }
 
   // Parses and applies a map recipe previously produced by saveCompareMap -
