@@ -283,19 +283,44 @@ export class Game {
   }
 
   // Pushed once, right at setup, before anything has run - round 0, the
-  // pristine starting layout (nobody's sensed anything yet, nobody has a
-  // route or a direction). Without this, frames[] started at round 1, which
-  // is already the result of everyone's FIRST exploration step - there was
-  // no way to see the actual starting positions in the exported/replayed
-  // trace at all. Not a counted round: it doesn't touch compareStats, and
-  // totalRounds/completedAtRound still mean exactly what they always have
-  // (tickCount's value) - this is simply frames[0], one extra entry ahead of
-  // round 1's.
+  // pristine starting layout (nobody has a route or a direction yet).
+  // Without this, frames[] started at round 1, which is already the result
+  // of everyone's FIRST exploration step - there was no way to see the
+  // actual starting positions in the exported/replayed trace at all. Not a
+  // counted round: it doesn't touch compareStats, and totalRounds/
+  // completedAtRound still mean exactly what they always have (tickCount's
+  // value) - this is simply frames[0], one extra entry ahead of round 1's.
+  //
+  // exploredMask here is each racer's own starting cell + its 4 neighbours,
+  // pre-marked as explored - mirroring what agent2Sense (called at the very
+  // top of every real decision) would mark the instant round 1 actually
+  // runs, computed here a beat early purely for the export/replay's sake so
+  // it shows "everyone already knows their own immediate surroundings" from
+  // frame 0 rather than a blank round 0 abruptly filling in at round 1. This
+  // is a LOCAL, read-only computation - it never touches the real
+  // game.agent2Sensed or the live ground highlight, both of which correctly
+  // stay untouched until the game actually starts running (see
+  // Game#_setupMapMode's ground-canvas setup).
+  //
+  // Mode A pre-unlock is the one case this must skip: nothing is supposed
+  // to be shared there until a racer actually reaches a goal (see
+  // compareSense/compareUnlockSharedVision) - round 0 can never be past
+  // that unlock (it happens at setup, before anything has run), so mode A's
+  // frame 0 stays entirely blank, consistent with every other pre-unlock
+  // frame instead of showing a moment of "sharing" that then vanishes again
+  // for however many rounds until the real unlock.
   _compareRecordInitialFrame() {
     const { blocksX, blocksY } = this.blockGrid;
+    const initialShared = new Set();
+    if (this.compareMode !== 'a') {
+      for (const r of this.mapRacers) {
+        initialShared.add(`${r.bx},${r.by}`);
+        for (const { dx, dy } of Object.values(MAP_DIR_DELTAS)) initialShared.add(`${r.bx + dx},${r.by + dy}`);
+      }
+    }
     this.compareTrace.push({
       round: 0,
-      exploredMask: this._rleEncodeGrid(blocksX, blocksY, () => false),
+      exploredMask: this._rleEncodeGrid(blocksX, blocksY, (x, y) => initialShared.has(`${x},${y}`)),
       racers: this.mapRacers.map((r) => ({
         id: r.id, bx: r.bx, by: r.by, status: r.status, movingDir: null, path: null,
       })),
