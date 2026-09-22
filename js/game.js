@@ -6,7 +6,7 @@ import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=88';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=16';
-import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed } from './compare.js?v=4';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision } from './compare.js?v=5';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -1913,6 +1913,12 @@ export class Game {
       }
       if (this._isMapGoal(racer.bx, racer.by)) {
         racer.status = 'reached';
+        // Mode A's shared-vision unlock has to fire right here, the instant
+        // a racer actually settles on a goal - see compareUnlockSharedVision's
+        // own comment for why waiting for compareChooseMove to get around to
+        // it (the only place this used to run) could lag the real arrival by
+        // several rounds. No-op for every mode/strategy but compare mode A.
+        if (this.mapStrategy === 'compare') compareUnlockSharedVision(this);
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
         const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);
         if (gi >= 0) this.mapGoalMarkers[gi].material.color.setHex(RACER_COLORS[racer.id % RACER_COLORS.length]);

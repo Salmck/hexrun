@@ -35,7 +35,16 @@ export function compareSetupState(game, starts) {
 // reached a goal. At that moment, fold every racer's own private sensed
 // cells into the one shared pool (game.agent2Sensed) so nothing anyone
 // already found on their own has to be rediscovered from scratch.
-function compareAUnlockSharedVision(game) {
+//
+// Game#_applyMapMove calls this directly, right where it sets a racer's
+// status to 'reached', so the unlock lands on the exact same round as the
+// arrival - a racer only calls back into compareChooseMove (which used to be
+// the sole place this ran) once its roll animation finishes and it's ready
+// for its NEXT decision, which can trail the actual arrival by several
+// rounds while every other racer is mid-animation. Kept idempotent (the
+// early return) so the redundant check compareChooseMove still does for
+// mode A is a no-op once this has already fired.
+export function compareUnlockSharedVision(game) {
   if (game.compareVisionShared) return;
   if (!game.mapRacers.some((r) => r.status === 'reached')) return;
   game.compareVisionShared = true;
@@ -73,7 +82,7 @@ export function compareAnyGoalSensed(game) {
 export function compareChooseMove(game, racer) {
   switch (game.compareMode) {
     case 'a': {
-      compareAUnlockSharedVision(game);
+      compareUnlockSharedVision(game);
       if (game.compareVisionShared) return agent2ChooseMove(game, racer);
       racer.comparePrivateSensed = racer.comparePrivateSensed || new Set();
       return agent2ChooseMove(game, racer, racer.comparePrivateSensed);
