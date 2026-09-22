@@ -3,10 +3,10 @@ import { buildRhombicuboctahedron, buildMesh } from './geometry.js';
 import { RollingShape } from './roller.js?v=1';
 import { findPath, generateObstacleGrid } from './maze.js?v=26';
 import { Renderer2D } from './renderer2d.js?v=32';
-import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=87';
+import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=88';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=16';
-import { compareSetupState, compareChooseMove } from './compare.js?v=2';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed } from './compare.js?v=4';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
 const BACKWARD = new THREE.Vector3(0, 0, 1);
@@ -106,9 +106,11 @@ export class Game {
     // plain user-set racer count, not derived from tasks/lines), just with
     // its own configurable size/seed instead of agent2's fixed size and
     // unseeded Math.random - see _setupMapMode and js/compare.js.
-    // compareMode ('a'/'b'/'c') picks which routing logic every racer uses
-    // this session; all three currently delegate to agent2's own logic
-    // unchanged (see js/compare.js) until they're given distinct ones.
+    // compareMode ('a'/'b'/'c'/'d') picks which routing logic every racer
+    // uses this session - see js/compare.js for what each one actually does
+    // (A withholds shared vision until a goal is reached; B/C/D are agent2's
+    // own fully-shared-vision logic, D being the untouched baseline A is
+    // compared against).
     this.compareMapSize = 8;
     this.compareSeed = -1;
     this.compareLastSeed = null;
@@ -233,7 +235,7 @@ export class Game {
   }
 
   setCompareMode(mode) {
-    const next = ['a', 'b', 'c'].includes(mode) ? mode : 'a';
+    const next = ['a', 'b', 'c', 'd'].includes(mode) ? mode : 'a';
     if (next === this.compareMode) return this.compareMode;
     this.compareMode = next;
     this.reset();
@@ -567,7 +569,7 @@ export class Game {
     this.racerCount = Math.max(1, Math.min(this.getMaxRacers(), Math.round(cfg.racerCount) || 1));
     const seed = Math.round(cfg.seed);
     this.compareSeed = Number.isFinite(seed) ? seed : -1;
-    this.compareMode = ['a', 'b', 'c'].includes(cfg.compareMode) ? cfg.compareMode : 'a';
+    this.compareMode = ['a', 'b', 'c', 'd'].includes(cfg.compareMode) ? cfg.compareMode : 'a';
     // A file saved before obstacleProbability existed (version 1) has no
     // such field - keeps whatever's already set, same fallback pattern as
     // colorPalette below.
@@ -1884,23 +1886,29 @@ export class Game {
 
     if (this.mapStrategy === 'agent2' || this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4' || this.mapStrategy === 'compare') {
       // Mark the arrived cell as covered ground in the shared record and sense
-      // from the new spot (both shared). If it's a goal, the racer has found
-      // one - it stops right there. Compare mode delegates wholesale to
-      // agent2's own state/sense (compareSetupState/compareChooseMove both
-      // just call agent2's directly - see compare.js), so it reuses
-      // agent2Visited/agent2Sense here too rather than keeping a separate
-      // (and redundant) copy.
+      // from the new spot. If it's a goal, the racer has found one - it stops
+      // right there. Compare mode delegates wholesale to agent2's own
+      // state (compareSetupState just calls agent2SetupState directly - see
+      // compare.js), so it reuses agent2Visited here too rather than keeping
+      // a separate (and redundant) copy - but sensing goes through
+      // compareSense, not agent2Sense directly, since compare mode A keeps
+      // each racer's view private until a goal is actually reached (see
+      // compare.js) while B/C/D still pool it like agent2 always has.
       const visited = (this.mapStrategy === 'agent2' || this.mapStrategy === 'compare') ? this.agent2Visited
         : this.mapStrategy === 'agent3' ? this.agent3Visited
         : this.agent4Visited;
       visited.add(`${racer.bx},${racer.by}`);
-      if (this.mapStrategy === 'agent2' || this.mapStrategy === 'compare') agent2Sense(this, racer);
+      if (this.mapStrategy === 'agent2') agent2Sense(this, racer);
+      else if (this.mapStrategy === 'compare') compareSense(this, racer);
       else if (this.mapStrategy === 'agent3') agent3Sense(this, racer);
       else agent4Sense(this, racer);
       // compareStats only exists in compare mode - every check here is a
-      // no-op for every other strategy.
+      // no-op for every other strategy. compareAnyGoalSensed checks both the
+      // shared pool and (mode A, pre-unlock) each racer's own private view,
+      // so "发现目标轮数" reflects the first time ANYONE became aware of a
+      // goal, not just the first time that awareness was shared.
       if (this.compareStats && this.compareStats.discoveredAt === null &&
-          this.mapGoals.some((g) => this.agent2Sensed.has(`${g.bx},${g.by}`))) {
+          compareAnyGoalSensed(this)) {
         this.compareStats.discoveredAt = this.compareStats.tickCount;
       }
       if (this._isMapGoal(racer.bx, racer.by)) {

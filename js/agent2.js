@@ -31,10 +31,11 @@ export function agent2SetupState(game, starts) {
   game.agent2Sensed = new Set();
 }
 
-// Adds the racer's own cell and its four neighbours to the shared view.
-export function agent2Sense(game, racer) {
-  game.agent2Sensed.add(`${racer.bx},${racer.by}`);
-  for (const [dx, dy] of DIRS) game.agent2Sensed.add(`${racer.bx + dx},${racer.by + dy}`);
+// Adds the racer's own cell and its four neighbours to the given sensed set
+// (game.agent2Sensed - the shared pool - unless the caller passes its own).
+export function agent2Sense(game, racer, sensedSet = game.agent2Sensed) {
+  sensedSet.add(`${racer.bx},${racer.by}`);
+  for (const [dx, dy] of DIRS) sensedSet.add(`${racer.bx + dx},${racer.by + dy}`);
 }
 
 // --------------------------------------------------------------------------
@@ -43,8 +44,16 @@ export function agent2Sense(game, racer) {
 
 // One decision for one racer. Returns the next cell to step onto, or null to
 // stay put this round. One returned move = one big cell.
-export function agent2ChooseMove(game, racer) {
-  agent2Sense(game, racer);
+//
+// `sensedSet` defaults to the shared pool (game.agent2Sensed) - agent2's own
+// mode and comparison-experiment modes B/C/D all call this with no third
+// argument and get the original fully-shared-vision behavior untouched.
+// Comparison-experiment mode A passes each racer's own private Set instead
+// (see js/compare.js), so this same routing/chain-yield logic can be reused
+// verbatim for "each racer only knows what it personally sensed" without a
+// second, divergence-prone copy of it.
+export function agent2ChooseMove(game, racer, sensedSet = game.agent2Sensed) {
+  agent2Sense(game, racer, sensedSet);
 
   // Open, unoccupied neighbouring cells it could step onto.
   const pool = DIRS
@@ -55,9 +64,10 @@ export function agent2ChooseMove(game, racer) {
   const adjGoal = pool.find((cell) => game._isMapGoal(cell.fx, cell.fy));
   if (adjGoal) return adjGoal;
 
-  // Vision is shared, so a goal counts as KNOWN the moment any racer has
-  // sensed it. Until at least one is known, keep exploring.
-  const knownGoals = game.mapGoals.filter((g) => game.agent2Sensed.has(`${g.bx},${g.by}`));
+  // A goal counts as KNOWN the moment it's in this racer's sensed set (shared
+  // pool, or its own private view - whichever sensedSet is in play). Until at
+  // least one is known, keep exploring.
+  const knownGoals = game.mapGoals.filter((g) => sensedSet.has(`${g.bx},${g.by}`));
   if (knownGoals.length) {
     // Once a goal is known, EVERY still-searching racer heads for the cluster.
     // Aim at the nearest goal NOBODY is stopped on so queuing racers spread
@@ -76,12 +86,12 @@ export function agent2ChooseMove(game, racer) {
       if (d < bestD) { bestD = d; target = g; }
     }
 
-    // A* plans over the shared sensed map using WALLS ONLY - no racer,
+    // A* plans over this racer's sensed map using WALLS ONLY - no racer,
     // stationary or moving, is ever treated as an obstacle, so the line is
     // never bent or held up by another object. Occupancy of the single next
     // cell is the only thing resolved locally (chain-yield for a racer stopped
     // on a goal in the way, progress-based yield for a moving one).
-    const sensedOpen = (x, y) => game.agent2Sensed.has(`${x},${y}`) && game.blockGrid.blockOpen(x, y);
+    const sensedOpen = (x, y) => sensedSet.has(`${x},${y}`) && game.blockGrid.blockOpen(x, y);
     const route = findPath(sensedOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, { fx: target.bx, fy: target.by });
     if (route && route.length >= 2) {
       // Publish remaining distance so _tryClearWayFor's yield is decided by
@@ -139,13 +149,14 @@ export function agent2ChooseMove(game, racer) {
     return cands[Math.floor(Math.random() * cands.length)];
   }
 
-  return agent2ExploreStep(game, racer, pool);
+  return agent2ExploreStep(game, racer, pool, sensedSet);
 }
 
 // One blind-exploration step: prefer ground nobody has stood on (shared
 // visited), don't immediately double back, and head toward the least-seen
-// direction so the shared map keeps growing outward.
-function agent2ExploreStep(game, racer, pool) {
+// direction (per `sensedSet` - the shared pool, or a racer's own private
+// view) so that map keeps growing outward.
+function agent2ExploreStep(game, racer, pool, sensedSet) {
   const fresh = pool.filter((cell) => !game.agent2Visited.has(`${cell.fx},${cell.fy}`));
   if (fresh.length) pool = fresh;
 
@@ -155,7 +166,7 @@ function agent2ExploreStep(game, racer, pool) {
   }
 
   const unseenAround = (cell) => DIRS
-    .filter(([dx, dy]) => !game.agent2Sensed.has(`${cell.fx + dx},${cell.fy + dy}`)).length;
+    .filter(([dx, dy]) => !sensedSet.has(`${cell.fx + dx},${cell.fy + dy}`)).length;
   const most = Math.max(...pool.map(unseenAround));
   pool = pool.filter((cell) => unseenAround(cell) === most);
 
