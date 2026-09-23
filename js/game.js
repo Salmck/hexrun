@@ -6,7 +6,7 @@ import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=92';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=17';
-import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers, compareUpdateClusterSettle } from './compare.js?v=11';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers, compareUpdateClusterSettle } from './compare.js?v=12';
 import { buildXlsxDataUrl } from './xlsx-export.js?v=2';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
@@ -111,8 +111,10 @@ export class Game {
     // uses this session - see js/compare.js for what each one actually does
     // (A withholds shared vision until a goal is reached; B disables the
     // endgame yield mechanism entirely, so a permanently blocked racer never
-    // finishes; C/D are agent2's own fully-shared-vision, yield-enabled
-    // logic, D being the untouched baseline A and B are compared against).
+    // finishes; C keeps yielding enabled but a 'reached' racer keeps
+    // repositioning within the goal cluster instead of freezing forever;
+    // D is the untouched fully-shared-vision, yield-enabled, freeze-on-
+    // arrival baseline every other mode is compared against).
     this.compareMapSize = 8;
     this.compareSeed = -1;
     this.compareLastSeed = null;
