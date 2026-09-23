@@ -6,7 +6,7 @@ import { Renderer2D } from './renderer2d.js?v=32';
 import { agent2SetupState, agent2Sense, agent2ChooseMove, pickScatteredGoals } from './agent2.js?v=92';
 import { agent3SetupState, agent3Sense, agent3ChooseMove, agent3GenerateMap } from './agent3.js?v=7';
 import { agent4SetupState, agent4Sense, agent4ChooseMove, agent4GenerateMap, agent4CreateRng, scaledMinComponents } from './agent4.js?v=17';
-import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers, compareUpdateClusterSettle } from './compare.js?v=12';
+import { compareSetupState, compareChooseMove, compareSense, compareAnyGoalSensed, compareUnlockSharedVision, compareCheckStuckRacers, compareUpdateClusterSettle, compareMarkGoalVisited } from './compare.js?v=13';
 import { buildXlsxDataUrl } from './xlsx-export.js?v=2';
 
 const FORWARD = new THREE.Vector3(0, 0, -1);
@@ -2071,6 +2071,12 @@ export class Game {
           // flood-fill rather than a guess based on how long something's
           // been idle.
           compareCheckStuckRacers(this);
+          // Mode C only (no-op elsewhere) - records this cell as visited for
+          // compareUpdateClusterSettle's "head for genuinely fresh ground"
+          // targeting. Fires for every arrival on a goal, not just a
+          // racer's first one, so a later cluster-repositioning move lands
+          // here too, the same way.
+          compareMarkGoalVisited(this, racer);
         }
         this._updateMapPathDots(racer, null); // stopped - clear its A* line
         const gi = this.mapGoals.findIndex((g) => g.bx === racer.bx && g.by === racer.by);
@@ -3154,14 +3160,6 @@ export class Game {
         const tracePositionsBefore = compareRunning
           ? this.mapRacers.map((r) => ({ bx: r.bx, by: r.by }))
           : null;
-        // Mode C only (no-op everywhere else) - a settled racer keeps
-        // drifting toward the goal cluster's interior instead of freezing
-        // forever; see compareUpdateClusterSettle's own comment. Runs after
-        // tracePositionsBefore is snapshotted (so any move it makes still
-        // gets picked up by the movingDir/anyMoved diff below) but before
-        // the main per-racer loop (so a racer it just moved is already
-        // correctly seen as busy this same frame - no double-move risk).
-        compareUpdateClusterSettle(this);
         for (const racer of this.mapRacers) {
           if (!racer.shape.isBusy()) {
             if (racer.pendingDir) {
@@ -3178,6 +3176,17 @@ export class Game {
           const p = racer.shape.group.position;
           racer.shadow.position.set(p.x, 0.02, p.z);
         }
+        // Mode C only (no-op everywhere else) - a settled racer keeps
+        // looking for somewhere fresh to reposition to instead of freezing
+        // forever; see compareUpdateClusterSettle's own comment. Deliberately
+        // runs AFTER the main per-racer loop above (not before), so a racer
+        // that just entered the cluster this very tick already holds its
+        // cell by the time any settled racer's own move gets decided here -
+        // that ordering alone is what gives an arriving racer priority for
+        // the same tick's cell, with no extra conflict-detection needed.
+        // Still runs before the movingDir/anyMoved diff below, so any move
+        // it makes this tick is correctly picked up by it.
+        compareUpdateClusterSettle(this);
         if (this.mapStrategy === 'agent4') this._updateAgent4Recenter();
         if (this.mapStrategy === 'agent3' || this.mapStrategy === 'agent4') this._updateAgent3Celebration(dt);
         if (compareRunning) {

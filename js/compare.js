@@ -33,22 +33,28 @@
 // - C also runs the engine unchanged for a still-'solving' racer, but a
 //   'reached' one does NOT freeze in place forever like it does in every
 //   other mode: see compareUpdateClusterSettle. Every tick, every settled
-//   racer asks a live question - "if I weren't standing here, would some
-//   free goal cell that's currently unreachable from outside the cluster
-//   become reachable?" (a BFS reachability diff, re-run fresh each time,
-//   not a static property of the cluster's shape - an earlier version
-//   ranked cells by a fixed "how deep into the cluster" score, but
+//   racer looks for the nearest known goal cell nobody has EVER stood on
+//   yet (compareGoalEverVisited - a persistent, only-grows record, so it
+//   heads for genuinely fresh ground rather than just refilling whatever a
+//   previous occupant happened to just vacate) and, if the whole route
+//   there is currently free of other racers, heads toward it one step at a
+//   time - never leaving the cluster itself. Tried two earlier approaches
+//   first: a static "depth from the cluster boundary" ranking (scrapped -
 //   growGoalCluster deliberately keeps every goal touching open ground, so
-//   virtually no generated cluster has any real interior to rank at all;
-//   this dynamic, occupancy-aware version replaces it and actually
-//   triggers). If the answer is yes, it's genuinely in the way and moves
-//   toward the nearest such cell; if not, it stays put - re-evaluated fresh
-//   every tick, independently and simultaneously for every settled racer
-//   (no shared turn order, no waiting for a newcomer to actually get
-//   stuck), never leaving the cluster itself. The existing chain/force-
-//   yield below is still there as a fallback for the rarer case a
-//   newcomer's target cell is held by a racer that genuinely isn't
-//   blocking anything.
+//   almost no generated cluster has any real interior to rank at all) and
+//   a live "am I currently blocking access to some free cell" reachability
+//   check (worked, but was reactive/defensive rather than actually
+//   exploring). This is simpler than both: every settled racer keeps
+//   trying, independently and simultaneously, continuously from the moment
+//   it arrives - not gated behind blocking anyone or a newcomer getting
+//   stuck. An arriving racer still gets priority over a repositioning one
+//   for the same tick's cell, purely from run order: Game#_tick calls
+//   compareUpdateClusterSettle AFTER the main still-'solving' loop, so a
+//   racer that just entered the cluster this tick already holds its cell
+//   by the time any settled racer's route-clear check runs. Existing
+//   chain/force-yield is still there as the fallback for the rarer case a
+//   newcomer's specific target cell is held by a racer with nowhere clear
+//   to go right now.
 // - A withholds the shared field of view: each racer only "knows" what it
 //   personally has sensed (including which frontiers it's found), so
 //   goal-discovery doesn't instantly propagate to the whole swarm. The
@@ -78,106 +84,37 @@ export function compareSetupState(game, starts) {
   // by B/C/D, which always pass compareChooseMoveImpl the shared pool
   // (game.agent2Sensed) directly.
   game.compareVisionShared = false;
-  // Only meaningful for mode C (see compareUpdateClusterSettle) - the fixed
-  // "doors" into the goal cluster from the open map, cheap enough to just
-  // always compute. game.mapGoals/blockGrid are already both set by the
-  // time this runs (see Game#_setupMapMode).
-  game.compareGoalEntrances = computeGoalEntrances(game);
-}
-
-// Goal cells that touch open, non-goal ground - the fixed set of "doors"
-// into the cluster from outside. Static for the whole run (the cluster's
-// shape never changes once generated) - used as the source set for the
-// live reachability search in compareUpdateClusterSettle, not as a measure
-// of anything by itself (an earlier version of this ranked cells by BFS
-// depth from here and had settled racers drift toward the deepest free
-// one, but growGoalCluster deliberately keeps EVERY goal touching open
-// ground - see its own comment - so virtually every generated cluster has
-// no cell deeper than 0 at all; that static approach turned out to almost
-// never have anything to do. This dynamic, occupancy-aware version below
-// replaces it).
-function computeGoalEntrances(game) {
-  const goalSet = new Set(game.mapGoals.map((g) => `${g.bx},${g.by}`));
-  const entrances = [];
-  for (const g of game.mapGoals) {
-    const key = `${g.bx},${g.by}`;
-    const touchesOpenGround = DIRS.some(([dx, dy]) => {
-      const nx = g.bx + dx, ny = g.by + dy;
-      return game.blockGrid.blockOpen(nx, ny) && !goalSet.has(`${nx},${ny}`);
-    });
-    if (touchesOpenGround) entrances.push(key);
-  }
-  return entrances;
-}
-
-// Which free (currently unoccupied) goal cells can be reached by walking
-// in from some entrance, staying entirely within the goal cluster
-// (goal-to-goal adjacency only), without passing through any cell in
-// `blocked`. Plain multi-source BFS, cheap - the cluster itself is never
-// bigger than the racer count.
-function reachableFreeGoals(game, entrances, blocked) {
-  const goalSet = new Set(game.mapGoals.map((g) => `${g.bx},${g.by}`));
-  const seen = new Set();
-  const queue = [];
-  for (const e of entrances) {
-    if (blocked.has(e) || seen.has(e)) continue;
-    seen.add(e);
-    queue.push(e);
-  }
-  const reachableFree = new Set();
-  let head = 0;
-  while (head < queue.length) {
-    const key = queue[head++];
-    if (!blocked.has(key)) reachableFree.add(key);
-    const sep = key.indexOf(',');
-    const x = Number(key.slice(0, sep)), y = Number(key.slice(sep + 1));
-    for (const [dx, dy] of DIRS) {
-      const nk = `${x + dx},${y + dy}`;
-      if (!goalSet.has(nk) || blocked.has(nk) || seen.has(nk)) continue;
-      seen.add(nk);
-      queue.push(nk);
-    }
-  }
-  return reachableFree;
+  // Only meaningful for mode C (see compareUpdateClusterSettle/
+  // compareMarkGoalVisited) - every goal cell any racer has EVER landed
+  // on, growing only (never cleared when a racer later moves off one), so
+  // a repositioning racer heads for genuinely fresh ground instead of just
+  // refilling whatever's nearest-free.
+  game.compareGoalEverVisited = new Set();
 }
 
 // Mode C only (no-op call for every other mode/strategy): a settled racer
-// keeps searching for a reason to move, for as long as it's actually
-// blocking something, instead of freezing the instant it lands - called
-// once per tick (see Game#_tick), independent of the normal still-'solving'
-// decision loop, which never runs for a 'reached' racer.
+// keeps looking for somewhere fresh to go instead of freezing the instant
+// it lands - called once per tick (see Game#_tick, AFTER the main
+// still-'solving' decision loop specifically so a racer that just entered
+// the cluster this same tick already holds its cell by the time this runs;
+// that ordering alone is what gives an arriving racer priority over a
+// settled one repositioning, with no extra conflict-detection code needed).
 //
-// The question each settled racer asks itself, every tick: "if I weren't
-// standing here, would some free goal cell that's currently unreachable
-// from outside the cluster become reachable?" (a live BFS reachability
-// diff, not a fixed notion of "depth" - see computeGoalEntrances for why a
-// static one didn't work out). If yes, it's genuinely in the way, and it
-// moves toward whichever such cell is nearest; if the diff comes up empty,
-// it isn't blocking anyone and stays put. Re-evaluated fresh every tick for
-// every settled racer, independently and simultaneously (no shared turn
-// order, no waiting for a newcomer to actually get stuck first) - existing
-// chain/force-yield is still there as a fallback for the rarer case a
-// newcomer's target cell is held by a racer that genuinely isn't blocking
-// anything (so this search leaves it alone) but the newcomer still needs
-// that exact cell.
+// Each settled racer looks for the NEAREST known goal cell nobody has ever
+// stood on yet (game.compareGoalEverVisited), and - only if the entire
+// route there is clear of other racers right now - starts toward it. If
+// the nearest fresh cell's route is blocked, it tries the next-nearest one
+// instead of giving up outright; if none has a clear route this tick, it
+// just stays put and re-checks next tick. Every settled racer does this
+// independently and simultaneously - no shared turn order - and it never
+// leaves the cluster itself. Existing chain/force-yield is still there as
+// the fallback for the rarer case a newcomer's specific target cell is
+// held by a racer with nowhere clear to go right now.
 export function compareUpdateClusterSettle(game) {
-  if (game.mapStrategy !== 'compare' || game.compareMode !== 'c' || !game.compareGoalEntrances) return;
-  const entrances = game.compareGoalEntrances;
-  const occupied = new Set(
-    game.mapRacers.filter((r) => r.status === 'reached').map((r) => `${r.bx},${r.by}`));
+  if (game.mapStrategy !== 'compare' || game.compareMode !== 'c' || !game.compareGoalEverVisited) return;
   for (const r of game.mapRacers) {
     if (r.status !== 'reached' || r.shape.isBusy() || r.pendingDir || (r.pendingGapMs || 0) > 0) continue;
-    const myKey = `${r.bx},${r.by}`;
-    // Recomputed fresh against `occupied` as currently updated (including
-    // any earlier racer in this same pass that already moved this tick),
-    // not a stale start-of-tick snapshot.
-    const baseline = reachableFreeGoals(game, entrances, occupied);
-    const withoutMe = new Set(occupied);
-    withoutMe.delete(myKey);
-    const withoutMeReachable = reachableFreeGoals(game, entrances, withoutMe);
-    const newlyOpened = [...withoutMeReachable].filter((k) => !baseline.has(k));
-    if (!newlyOpened.length) continue; // not blocking anything right now
-    const next = stepToward(game, r, newlyOpened);
+    const next = clusterExploreStep(game, r);
     if (!next) continue;
     // Vacating this goal cell - reset its marker to neutral before moving,
     // same as agent2ChainYield/agent2ForceYield already do when THEY slide
@@ -189,36 +126,51 @@ export function compareUpdateClusterSettle(game) {
     const gi = game.mapGoals.findIndex((g) => g.bx === r.bx && g.by === r.by);
     if (gi >= 0) game.mapGoalMarkers[gi].material.color.setHex(0x35b88a);
     game._applyMapMove(r, next);
-    occupied.delete(myKey);
-    occupied.add(`${next.fx},${next.fy}`);
   }
 }
 
-// The first step of a route from `racer`'s current cell toward whichever
-// cell in `candidates` is nearest (Manhattan distance - cheap tie-break,
-// not itself the route), planned entirely within the goal cluster
-// (goal-to-goal adjacency, occupancy ignored for the PLANNING itself - a
-// racer mid-route through a cell someone else is currently sitting on
-// simply waits there for it to clear, same as every other routing in this
-// game). Returns null if no route exists or the immediate next cell is
-// occupied right now.
-function stepToward(game, racer, candidates) {
+// The next single step toward the nearest known, never-visited goal cell
+// whose entire route (from here to there) is free of other racers right
+// now - or null if every candidate's route is currently blocked somewhere,
+// or there's nowhere fresh left to go at all. Routing stays entirely
+// within the goal cluster (goal-to-goal adjacency only), never the open
+// map outside it.
+function clusterExploreStep(game, racer) {
   const goalSet = new Set(game.mapGoals.map((g) => `${g.bx},${g.by}`));
-  let bestKey = null, bestD = Infinity;
-  for (const key of candidates) {
-    const sep = key.indexOf(',');
-    const x = Number(key.slice(0, sep)), y = Number(key.slice(sep + 1));
-    const d = Math.abs(x - racer.bx) + Math.abs(y - racer.by);
-    if (d < bestD) { bestD = d; bestKey = key; }
-  }
-  if (!bestKey) return null;
-  const sep = bestKey.indexOf(',');
-  const target = { fx: Number(bestKey.slice(0, sep)), fy: Number(bestKey.slice(sep + 1)) };
   const clusterOpen = (x, y) => goalSet.has(`${x},${y}`);
-  const route = findPath(clusterOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, target);
-  if (!route || route.length < 2) return null;
-  const next = route[1];
-  return game._mapCellAvailable(next.fx, next.fy, racer) ? next : null;
+  const candidates = game.mapGoals
+    .map((g) => ({ fx: g.bx, fy: g.by }))
+    .filter((g) => {
+      const key = `${g.fx},${g.fy}`;
+      return game.agent2Sensed.has(key) && !game.compareGoalEverVisited.has(key)
+        && !(g.fx === racer.bx && g.fy === racer.by);
+    })
+    .sort((a, b) =>
+      (Math.abs(a.fx - racer.bx) + Math.abs(a.fy - racer.by)) -
+      (Math.abs(b.fx - racer.bx) + Math.abs(b.fy - racer.by)));
+
+  for (const target of candidates) {
+    const route = findPath(clusterOpen, game.blockGrid.blocksX, { fx: racer.bx, fy: racer.by }, target);
+    if (!route || route.length < 2) continue;
+    // "如果没有其他物体遮挡，就直接过去" - only commit to this route if
+    // every cell along it (besides where I already stand) is free of
+    // anyone else right now, not just the immediate next step.
+    const clear = route.slice(1).every((c) => game._mapCellAvailable(c.fx, c.fy, racer));
+    if (!clear) continue;
+    return route[1];
+  }
+  return null;
+}
+
+// Records that a racer has landed on this goal cell, for
+// compareUpdateClusterSettle's "never-visited" targeting above. Game#
+// _applyMapMove calls this right alongside compareUnlockSharedVision/
+// compareCheckStuckRacers, in the same arrival block - covers both a
+// racer's very first arrival and every later cluster-repositioning arrival
+// the same way, since both land on a real goal cell exactly the same way.
+export function compareMarkGoalVisited(game, racer) {
+  if (!game.compareGoalEverVisited) return;
+  game.compareGoalEverVisited.add(`${racer.bx},${racer.by}`);
 }
 
 // Mode A's private-vision phase ends the instant any racer has actually
