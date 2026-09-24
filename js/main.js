@@ -1,4 +1,4 @@
-import { Game } from './game.js?v=145';
+import { Game } from './game.js?v=146';
 
 const canvas = document.getElementById('scene');
 const labelAEl = document.getElementById('label-a');
@@ -54,6 +54,16 @@ const game = new Game(canvas, {
 });
 game.setSpeed(speedSelect.value);
 window.__game = game;
+
+// Hidden shortcut: Ctrl+Shift+Z toggles whether saveCompareMap also
+// downloads the trace .json (off by default) - deliberately no on-screen
+// indicator, see Game#toggleCompareTraceDownload.
+window.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.shiftKey && (e.key === 'Z' || e.key === 'z')) {
+    e.preventDefault();
+    game.toggleCompareTraceDownload();
+  }
+});
 
 toggleBtn.addEventListener('click', () => {
   const running = game.toggle();

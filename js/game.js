@@ -124,6 +124,12 @@ export class Game {
     // other obstacle-based mode, which just uses generateObstacleGrid's own
     // built-in default.
     this.compareObstacleProbability = DEFAULT_COMPARE_OBSTACLE_PROBABILITY;
+    // Whether saveCompareMap's trace .json also gets downloaded - off by
+    // default (it's the biggest of the three files and most people saving a
+    // map just want the config+screenshot). Toggled by a hidden keyboard
+    // shortcut (Ctrl+Shift+Z, see main.js) with no UI indicator by design -
+    // see toggleCompareTraceDownload.
+    this.compareDownloadTraceOnSave = false;
     // A fixed-length palette of AGENT4_PALETTE_SIZE colors, shared across
     // every agent-4 session on this machine - racer id `i` always uses
     // palette[i % length], so a given index's color never shifts just
@@ -615,8 +621,18 @@ export class Game {
     // Not pretty-printed (unlike the small config file above) - it's meant
     // for a script to read back, not a person, and the indentation/newlines
     // alone can easily double or triple the size of a file already this
-    // repetitive.
-    this._downloadText(`hexrun-compare-map-${stamp}-trace.json`, JSON.stringify(this._compareBuildTraceExport()), 'application/json');
+    // repetitive. Only downloaded when compareDownloadTraceOnSave is on
+    // (Ctrl+Shift+Z, off by default) - see its own comment.
+    if (this.compareDownloadTraceOnSave) {
+      this._downloadText(`hexrun-compare-map-${stamp}-trace.json`, JSON.stringify(this._compareBuildTraceExport()), 'application/json');
+    }
+  }
+
+  // Flips compareDownloadTraceOnSave - see its own comment for what it
+  // gates and why there's deliberately no on-screen indicator for it.
+  toggleCompareTraceDownload() {
+    this.compareDownloadTraceOnSave = !this.compareDownloadTraceOnSave;
+    return this.compareDownloadTraceOnSave;
   }
 
   // Exports the current compare-mode map's static info plus the live stats
