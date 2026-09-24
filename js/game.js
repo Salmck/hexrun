@@ -673,9 +673,28 @@ export class Game {
       ['无法到达数', stuckCount],
     ];
 
+    // A grid mirroring the map's own layout (row = y, column = x): each
+    // cell's value is how many times ANY racer has ever stepped onto it
+    // over the whole run, aggregated from each racer's own visitCounts
+    // (already tracked live for exploration heuristics - see
+    // agent2ExploreStep/agent4's pickTowardUnseen - so this needs no new
+    // per-tick bookkeeping, just a sum at export time). A racer's own
+    // starting cell counts as one visit, same as visitCounts itself always
+    // has; a wall cell naturally reads 0, since nothing ever steps there.
+    const cellVisitRows = [['', ...Array.from({ length: blocksX }, (_, x) => x)]];
+    for (let y = 0; y < blocksY; y++) {
+      const row = [y];
+      for (let x = 0; x < blocksX; x++) {
+        const key = `${x},${y}`;
+        row.push(this.mapRacers.reduce((sum, r) => sum + (r.visitCounts.get(key) || 0), 0));
+      }
+      cellVisitRows.push(row);
+    }
+
     const dataUrl = buildXlsxDataUrl([
       { name: '地图信息', rows: mapRows },
       { name: '数据面板', rows: statsRows },
+      { name: '格子访问次数', rows: cellVisitRows },
     ]);
     this._downloadDataUrl(`hexrun-compare-map-${stamp}-data.xlsx`, dataUrl);
   }
