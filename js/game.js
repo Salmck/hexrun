@@ -671,32 +671,34 @@ export class Game {
       ['总轮数', s.tickCount ?? 0],
       ['平均每轮耗时(ms)', s.tickCount ? Number((s.totalTickMs / s.tickCount).toFixed(3)) : '--'],
       ['无法到达数', stuckCount],
+      ['格子重复经过次数', this._compareRepeatVisitCount()],
     ];
-
-    // A grid mirroring the map's own layout (row = y, column = x): each
-    // cell's value is how many times ANY racer has ever stepped onto it
-    // over the whole run, aggregated from each racer's own visitCounts
-    // (already tracked live for exploration heuristics - see
-    // agent2ExploreStep/agent4's pickTowardUnseen - so this needs no new
-    // per-tick bookkeeping, just a sum at export time). A racer's own
-    // starting cell counts as one visit, same as visitCounts itself always
-    // has; a wall cell naturally reads 0, since nothing ever steps there.
-    const cellVisitRows = [['', ...Array.from({ length: blocksX }, (_, x) => x)]];
-    for (let y = 0; y < blocksY; y++) {
-      const row = [y];
-      for (let x = 0; x < blocksX; x++) {
-        const key = `${x},${y}`;
-        row.push(this.mapRacers.reduce((sum, r) => sum + (r.visitCounts.get(key) || 0), 0));
-      }
-      cellVisitRows.push(row);
-    }
 
     const dataUrl = buildXlsxDataUrl([
       { name: '地图信息', rows: mapRows },
       { name: '数据面板', rows: statsRows },
-      { name: '格子访问次数', rows: cellVisitRows },
     ]);
     this._downloadDataUrl(`hexrun-compare-map-${stamp}-data.xlsx`, dataUrl);
+  }
+
+  // How many times, in total, some map cell got stepped onto AGAIN after
+  // already having been visited once - i.e. total visits across every
+  // racer minus how many DISTINCT cells were ever reached. A single
+  // aggregate number (not a per-cell breakdown), meant as a rough "how much
+  // backtracking/redundant travel happened this run" signal. Derived from
+  // each racer's own visitCounts (already tracked live for the exploration
+  // heuristics in agent2ExploreStep/agent4's pickTowardUnseen), so this
+  // needs no separate per-tick bookkeeping of its own.
+  _compareRepeatVisitCount() {
+    const combined = new Map();
+    for (const r of this.mapRacers) {
+      for (const [key, count] of r.visitCounts) {
+        combined.set(key, (combined.get(key) || 0) + count);
+      }
+    }
+    let repeats = 0;
+    for (const count of combined.values()) repeats += count - 1;
+    return repeats;
   }
 
   // Parses and applies a map recipe previously produced by saveCompareMap -
